@@ -11,6 +11,12 @@ import {
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
+// Maps folder prefixes to author names for auto-imported content
+interface AutoImportMapping {
+	folder: string;
+	author: string;
+}
+
 interface AuthorshipTrackerSettings {
 	authorName: string;
 	debounceMs: number;
@@ -18,6 +24,7 @@ interface AuthorshipTrackerSettings {
 	ignoreFolders: string[];
 	ignoreFiles: string[];
 	editLogsPath: string;
+	autoImportFolders: AutoImportMapping[];
 }
 
 const DEFAULT_SETTINGS: AuthorshipTrackerSettings = {
@@ -34,6 +41,11 @@ const DEFAULT_SETTINGS: AuthorshipTrackerSettings = {
 	],
 	ignoreFiles: ["CLAUDE.md", "GEMINI.md", "claude-scratchpad.md"],
 	editLogsPath: "99-System/Edit-Logs",
+	autoImportFolders: [
+		{ folder: "Emails", author: "power-automate:email" },
+		{ folder: "TeamsChats/messages", author: "power-automate:teams" },
+		{ folder: "06-Career/Transcripts", author: "power-automate:teams-transcript" },
+	],
 };
 
 // ─── LRU Cache ────────────────────────────────────────────────────────────────
@@ -265,6 +277,19 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 		return false;
 	}
 
+	/**
+	 * Check if a file is in an auto-import folder (Power Automate, etc).
+	 * Returns the mapped author name, or null if not an auto-import.
+	 */
+	private getAutoImportAuthor(file: TFile): string | null {
+		for (const mapping of this.settings.autoImportFolders) {
+			if (file.path.startsWith(mapping.folder + "/")) {
+				return mapping.author;
+			}
+		}
+		return null;
+	}
+
 	private async handleEdit(editor: Editor, file: TFile) {
 		this._stampInProgress.add(file.path);
 		setTimeout(() => this._stampInProgress.delete(file.path), 1000);
@@ -304,6 +329,13 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 		this._stampInProgress.add(file.path);
 		setTimeout(() => this._stampInProgress.delete(file.path), 1000);
 
+		// Determine author: auto-import source or human user
+		const autoImportAuthor = this.getAutoImportAuthor(file);
+		const author = autoImportAuthor ?? this.settings.authorName;
+		const summary = autoImportAuthor
+			? `Auto-imported from ${autoImportAuthor}`
+			: "File created by user";
+
 		try {
 			let alreadyHasField = false;
 
@@ -312,7 +344,7 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 					alreadyHasField = true;
 					return;
 				}
-				fm["created_by"] = this.settings.authorName;
+				fm["created_by"] = author;
 			});
 
 			if (!alreadyHasField) {
@@ -322,9 +354,9 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 				await this.appendLog({
 					ts: new Date().toISOString().replace(/\.\d{3}Z$/, ""),
 					file: file.path.replace(/\\/g, "/"),
-					author: this.settings.authorName,
+					author,
 					action: "created",
-					summary: "File created by user",
+					summary,
 				});
 			}
 		} catch (err) {
@@ -495,5 +527,45 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					}),
 			);
+
+		containerEl.createEl("h3", { text: "Auto-Import Folders" });
+		containerEl.createEl("p", {
+			text: "Files created in these folders are stamped with the mapped author instead of your name. One mapping per line: folder=author",
+			cls: "setting-item-description",
+		});
+
+		new Setting(containerEl)
+			.setName("Folder-to-author mappings")
+			.setDesc(
+				"One per line: FolderPath=AuthorName (e.g. Emails=power-automate:email)",
+			)
+			.addTextArea((text) => {
+				text.inputEl.rows = 5;
+				text.inputEl.cols = 50;
+				text
+					.setPlaceholder(
+						"Emails=power-automate:email\nTeamsChats/messages=power-automate:teams",
+					)
+					.setValue(
+						this.plugin.settings.autoImportFolders
+							.map((m) => `${m.folder}=${m.author}`)
+							.join("\n"),
+					)
+					.onChange(async (value) => {
+						this.plugin.settings.autoImportFolders = value
+							.split("\n")
+							.map((line) => line.trim())
+							.filter((line) => line.includes("="))
+							.map((line) => {
+								const eqIdx = line.indexOf("=");
+								return {
+									folder: line.slice(0, eqIdx).trim(),
+									author: line.slice(eqIdx + 1).trim(),
+								};
+							})
+							.filter((m) => m.folder && m.author);
+						await this.plugin.saveSettings();
+					});
+			});
 	}
 }
