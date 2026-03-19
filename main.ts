@@ -237,23 +237,32 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 			}),
 		);
 
-		// Stamp created_by on new files (after Templater finishes)
-		this.registerEvent(
-			this.app.vault.on("create", (file) => {
-				if (!(file instanceof TFile)) return;
-				if (file.extension !== "md") return;
-				if (this.shouldIgnore(file)) return;
+		// Auto-import detection ONLY — wrapped in onLayoutReady to prevent
+		// the initial vault-indexing stampede where vault.on('create') fires
+		// for every file during plugin load.
+		// Non-auto-import files get created_by from first editor-change (Bryan)
+		// or from Claude's PostToolUse hook.
+		this.app.workspace.onLayoutReady(() => {
+			this.registerEvent(
+				this.app.vault.on("create", (file) => {
+					if (!(file instanceof TFile)) return;
+					if (file.extension !== "md") return;
+					if (this.shouldIgnore(file)) return;
 
-				const createPath = file.path;
-				setTimeout(() => {
-					// Verify file still exists before stamping
-					const currentFile = this.app.vault.getAbstractFileByPath(createPath);
-					if (currentFile instanceof TFile) {
-						this.handleCreate(currentFile);
-					}
-				}, 3000);
-			}),
-		);
+					// ONLY stamp if file matches an auto-import folder
+					const autoImportAuthor = this.getAutoImportAuthor(file);
+					if (!autoImportAuthor) return; // Skip — not an auto-import
+
+					const createPath = file.path;
+					setTimeout(() => {
+						const currentFile = this.app.vault.getAbstractFileByPath(createPath);
+						if (currentFile instanceof TFile) {
+							this.handleCreate(currentFile);
+						}
+					}, 3000);
+				}),
+			);
+		});
 
 		this.addSettingTab(
 			new AuthorshipTrackerSettingTab(this.app, this),
@@ -306,6 +315,12 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 
 		try {
 			await this.app.fileManager.processFrontMatter(file, (fm) => {
+				// If created_by is absent, this is Bryan's first edit of a file
+				// without a creator stamp — credit him as creator
+				if (!fm["created_by"]) {
+					fm["created_by"] = this.settings.authorName;
+					fm["content_origin"] = "human-authored";
+				}
 				fm["last_modified_by"] = this.settings.authorName;
 				fm["edit_count"] =
 					typeof fm["edit_count"] === "number"
