@@ -1,0 +1,9 @@
+{
+  "id": "obsidian-authorship-tracker",
+  "name": "Authorship Tracker",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Tracks who creates and modifies notes — designed for human/AI collaborative vaults",
+  "author": "Bryan Kolb",
+  "isDesktopOnly": true
+}

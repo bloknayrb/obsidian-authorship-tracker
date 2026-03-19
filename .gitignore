@@ -1,0 +1,14 @@
+# npm
+node_modules/
+
+# Build output (main.js is generated — release builds attached to GitHub releases)
+main.js
+
+# IDE
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
