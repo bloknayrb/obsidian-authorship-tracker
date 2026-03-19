@@ -189,9 +189,15 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 					const existing = this._debounceTimers.get(file.path);
 					if (existing) clearTimeout(existing);
 
-					const timer = setTimeout(() => {
-						this._debounceTimers.delete(file.path);
-						this.handleEdit(editor, file);
+					// Capture file path for stale-reference safety check
+				const filePath = file.path;
+				const timer = setTimeout(() => {
+						this._debounceTimers.delete(filePath);
+						// Verify the editor is still showing the same file
+						const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+						if (activeView?.file?.path === filePath) {
+							this.handleEdit(activeView.editor, activeView.file);
+						}
 					}, this.settings.debounceMs);
 
 					this._debounceTimers.set(file.path, timer);
@@ -226,8 +232,13 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 				if (file.extension !== "md") return;
 				if (this.shouldIgnore(file)) return;
 
+				const createPath = file.path;
 				setTimeout(() => {
-					this.handleCreate(file);
+					// Verify file still exists before stamping
+					const currentFile = this.app.vault.getAbstractFileByPath(createPath);
+					if (currentFile instanceof TFile) {
+						this.handleCreate(currentFile);
+					}
 				}, 3000);
 			}),
 		);
