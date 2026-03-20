@@ -11,10 +11,12 @@ import {
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
-// Maps folder prefixes to author names for auto-imported content
+// Maps folder prefixes to author names and content origins for auto-imported content
 interface AutoImportMapping {
 	folder: string;
 	author: string;
+	contentOrigin: string;
+	filenamePattern?: string;  // Optional regex for mixed-content folders
 }
 
 interface AuthorshipTrackerSettings {
@@ -42,9 +44,12 @@ const DEFAULT_SETTINGS: AuthorshipTrackerSettings = {
 	ignoreFiles: ["CLAUDE.md", "GEMINI.md", "claude-scratchpad.md"],
 	editLogsPath: "99-System/Edit-Logs",
 	autoImportFolders: [
-		{ folder: "Emails", author: "power-automate:email" },
-		{ folder: "TeamsChats/messages", author: "power-automate:teams" },
-		{ folder: "06-Career/Transcripts", author: "power-automate:teams-transcript" },
+		{ folder: "Emails", author: "power-automate:email", contentOrigin: "primary" },
+		{ folder: "TeamsChats/messages", author: "power-automate:teams", contentOrigin: "primary" },
+		{ folder: "06-Career/Transcripts/Processed Transcripts", author: "power-automate:teams-transcript", contentOrigin: "primary" },
+		{ folder: "06-Career/Transcripts/Completed Notes", author: "power-automate:teams-meeting-note", contentOrigin: "ai-derived" },
+		{ folder: "06-Career/Transcripts/General", author: "power-automate:teams-transcript", contentOrigin: "primary", filenamePattern: "^Transcript-" },
+		{ folder: "06-Career/Transcripts/General", author: "power-automate:teams-meeting-note", contentOrigin: "ai-derived", filenamePattern: "^(MeetingNotes-|Meeting Note-)" },
 	],
 };
 
@@ -250,8 +255,8 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 					if (this.shouldIgnore(file)) return;
 
 					// ONLY stamp if file matches an auto-import folder
-					const autoImportAuthor = this.getAutoImportAuthor(file);
-					if (!autoImportAuthor) return; // Skip — not an auto-import
+					const result = this.getAutoImportResult(file);
+					if (!result) return; // Skip — not an auto-import
 
 					const createPath = file.path;
 					setTimeout(() => {
@@ -288,13 +293,17 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 
 	/**
 	 * Check if a file is in an auto-import folder (Power Automate, etc).
-	 * Returns the mapped author name, or null if not an auto-import.
+	 * Returns the mapped author + contentOrigin, or null if not an auto-import.
+	 * For folders with filenamePattern, only matches if the filename matches the regex.
 	 */
-	private getAutoImportAuthor(file: TFile): string | null {
+	private getAutoImportResult(file: TFile): { author: string; contentOrigin: string } | null {
 		for (const mapping of this.settings.autoImportFolders) {
-			if (file.path.startsWith(mapping.folder + "/")) {
-				return mapping.author;
+			if (!file.path.startsWith(mapping.folder + "/")) continue;
+			if (mapping.filenamePattern) {
+				const pattern = new RegExp(mapping.filenamePattern);
+				if (!pattern.test(file.name)) continue;
 			}
+			return { author: mapping.author, contentOrigin: mapping.contentOrigin ?? "primary" };
 		}
 		return null;
 	}
@@ -344,11 +353,12 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 		this._stampInProgress.add(file.path);
 		setTimeout(() => this._stampInProgress.delete(file.path), 1000);
 
-		// Determine author: auto-import source or human user
-		const autoImportAuthor = this.getAutoImportAuthor(file);
-		const author = autoImportAuthor ?? this.settings.authorName;
-		const summary = autoImportAuthor
-			? `Auto-imported from ${autoImportAuthor}`
+		// Determine author + content origin: auto-import source or human user
+		const result = this.getAutoImportResult(file);
+		const author = result?.author ?? this.settings.authorName;
+		const contentOrigin = result?.contentOrigin ?? "human-authored";
+		const summary = result
+			? `Auto-imported from ${author}`
 			: "File created by user";
 
 		try {
@@ -360,6 +370,7 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 					return;
 				}
 				fm["created_by"] = author;
+				fm["content_origin"] = contentOrigin;
 			});
 
 			if (!alreadyHasField) {
@@ -545,25 +556,25 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 
 		containerEl.createEl("h3", { text: "Auto-Import Folders" });
 		containerEl.createEl("p", {
-			text: "Files created in these folders are stamped with the mapped author instead of your name. One mapping per line: folder=author",
+			text: "Files created in these folders are stamped with the mapped author and content origin. Format: folder=author|contentOrigin[|filenamePattern]",
 			cls: "setting-item-description",
 		});
 
 		new Setting(containerEl)
 			.setName("Folder-to-author mappings")
 			.setDesc(
-				"One per line: FolderPath=AuthorName (e.g. Emails=power-automate:email)",
+				"One per line: Folder=Author|ContentOrigin[|FilenamePattern] (e.g. Emails=power-automate:email|primary)",
 			)
 			.addTextArea((text) => {
-				text.inputEl.rows = 5;
+				text.inputEl.rows = 8;
 				text.inputEl.cols = 50;
 				text
 					.setPlaceholder(
-						"Emails=power-automate:email\nTeamsChats/messages=power-automate:teams",
+						"Emails=power-automate:email|primary\nTeamsChats/messages=power-automate:teams|primary",
 					)
 					.setValue(
 						this.plugin.settings.autoImportFolders
-							.map((m) => `${m.folder}=${m.author}`)
+							.map((m) => m.folder + "=" + m.author + "|" + m.contentOrigin + (m.filenamePattern ? "|" + m.filenamePattern : ""))
 							.join("\n"),
 					)
 					.onChange(async (value) => {
@@ -573,10 +584,18 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 							.filter((line) => line.includes("="))
 							.map((line) => {
 								const eqIdx = line.indexOf("=");
-								return {
-									folder: line.slice(0, eqIdx).trim(),
-									author: line.slice(eqIdx + 1).trim(),
+								const folder = line.slice(0, eqIdx).trim();
+								const rest = line.slice(eqIdx + 1).trim();
+								const parts = rest.split("|");
+								const mapping: AutoImportMapping = {
+									folder,
+									author: parts[0]?.trim() || "",
+									contentOrigin: parts[1]?.trim() || "primary",
 								};
+								if (parts[2]?.trim()) {
+									mapping.filenamePattern = parts[2].trim();
+								}
+								return mapping;
 							})
 							.filter((m) => m.folder && m.author);
 						await this.plugin.saveSettings();
