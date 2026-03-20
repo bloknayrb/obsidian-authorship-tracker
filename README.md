@@ -100,14 +100,16 @@ The channels are designed to not conflict:
 
 Files created in these folders are automatically attributed to the mapped source:
 
-| Folder | Author | Content Origin |
-|--------|--------|---------------|
-| `Emails/` | `power-automate:email` | `primary` |
-| `TeamsChats/messages/` | `power-automate:teams` | `primary` |
-| `Transcripts/Processed Transcripts/` | `power-automate:teams-transcript` | `primary` |
-| `Transcripts/Completed Notes/` | `power-automate:teams-meeting-note` | `ai-derived` |
+| Folder | Author | Content Origin | Filename Pattern |
+|--------|--------|---------------|-----------------|
+| `Emails/` | `power-automate:email` | `primary` | — |
+| `TeamsChats/messages/` | `power-automate:teams` | `primary` | — |
+| `Transcripts/Processed Transcripts/` | `power-automate:teams-transcript` | `primary` | — |
+| `Transcripts/Completed Notes/` | `power-automate:teams-meeting-note` | `ai-derived` | — |
+| `Transcripts/General/` | `power-automate:teams-transcript` | `primary` | `^Transcript-` |
+| `Transcripts/General/` | `power-automate:teams-meeting-note` | `ai-derived` | `^(MeetingNotes-\|Meeting Note-)` |
 
-Mappings support optional filename patterns for folders with mixed content (e.g., `Transcript-*` vs `MeetingNotes-*` in the same folder). Configurable in Settings.
+Files in `General/` matching neither pattern fall through all mappings and receive no stamp — they are handled by other channels. Configurable in Settings.
 
 ## Settings
 
@@ -119,7 +121,7 @@ Mappings support optional filename patterns for folders with mixed content (e.g.
 | Ignored folders | Templates, Excalidraw, .obsidian, ... | Folders excluded from tracking |
 | Ignored files | CLAUDE.md, GEMINI.md, ... | Files excluded from tracking |
 | Edit logs path | `99-System/Edit-Logs` | Where daily JSONL logs are written |
-| Auto-import mappings | (see above) | Folder-to-author-to-origin mappings |
+| Auto-import mappings | (see above) | Format: `Folder=Author\|ContentOrigin[\|FilenamePattern]` |
 
 ## Dataview Queries
 
