@@ -1,21 +1,34 @@
 {
-  "name": "obsidian-authorship-tracker",
-  "version": "1.0.0",
-  "description": "Tracks who creates and modifies notes — designed for human/AI collaborative vaults",
+  "name": "authorship-tracker",
+  "version": "1.0.1",
+  "description": "Tracks who creates and modifies notes — designed for human/AI collaborative vaults.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+    "build": "tsc -noEmit -skipLibCheck -p tsconfig.json && node esbuild.config.mjs production",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "version": "node version-bump.mjs && git add manifest.json versions.json"
   },
-  "keywords": [],
+  "keywords": [
+    "obsidian",
+    "authorship",
+    "provenance",
+    "metadata"
+  ],
   "author": "Bryan Kolb",
   "license": "MIT",
   "devDependencies": {
-    "@types/node": "^16.11.6",
+    "@types/node": "^20.11.0",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "@typescript-eslint/parser": "^6.21.0",
     "builtin-modules": "3.3.0",
     "esbuild": "0.17.3",
+    "eslint": "^8.57.0",
     "obsidian": "latest",
     "tslib": "2.4.0",
-    "typescript": "4.7.4"
+    "typescript": "4.7.4",
+    "vitest": "^1.6.0"
   }
 }

@@ -3,21 +3,38 @@ import {
 	Editor,
 	MarkdownView,
 	MarkdownFileInfo,
+	Notice,
 	Plugin,
 	PluginSettingTab,
 	Setting,
 	TFile,
+	TFolder,
+	normalizePath,
 } from "obsidian";
 
-// ─── Settings ─────────────────────────────────────────────────────────────────
+import { LRUCache } from "./src/lru";
+import { generateDiffSummary } from "./src/diff";
+import {
+	AutoImportMapping,
+	getAutoImportResult,
+	parseMappings,
+	serializeMappings,
+	invalidPatterns,
+} from "./src/mappings";
+import { shouldIgnoreFile } from "./src/paths";
+import { formatLocalTimestamp, localDateString } from "./src/time";
 
-// Maps folder prefixes to author names and content origins for auto-imported content
-interface AutoImportMapping {
-	folder: string;
-	author: string;
-	contentOrigin: string;
-	filenamePattern?: string;  // Optional regex for mixed-content folders
-}
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+// How long to wait after a file is created in an auto-import folder before
+// stamping it, giving external importers / templates time to finish writing.
+const AUTO_IMPORT_STAMP_DELAY_MS = 3000;
+// Fallback author used when no author name is configured.
+const FALLBACK_AUTHOR = "me";
+// Minimum interval between user-facing error notices, to avoid spamming.
+const NOTICE_THROTTLE_MS = 60000;
+
+// ─── Settings ─────────────────────────────────────────────────────────────────
 
 interface AuthorshipTrackerSettings {
 	authorName: string;
@@ -26,143 +43,20 @@ interface AuthorshipTrackerSettings {
 	ignoreFolders: string[];
 	ignoreFiles: string[];
 	editLogsPath: string;
+	logRetentionDays: number;
 	autoImportFolders: AutoImportMapping[];
 }
 
 const DEFAULT_SETTINGS: AuthorshipTrackerSettings = {
-	authorName: "bryan",
+	authorName: "",
 	debounceMs: 10000,
 	maxCacheSize: 50,
-	ignoreFolders: [
-		"Templates",
-		"Excalidraw",
-		".obsidian",
-		"__pycache__",
-		"smart prompts",
-		"_media-sync_resources",
-	],
-	ignoreFiles: ["CLAUDE.md", "GEMINI.md", "claude-scratchpad.md"],
-	editLogsPath: "99-System/Edit-Logs",
-	autoImportFolders: [
-		{ folder: "Emails", author: "power-automate:email", contentOrigin: "primary" },
-		{ folder: "TeamsChats/messages", author: "power-automate:teams", contentOrigin: "primary" },
-		{ folder: "06-Career/Transcripts/Processed Transcripts", author: "power-automate:teams-transcript", contentOrigin: "primary" },
-		{ folder: "06-Career/Transcripts/Completed Notes", author: "power-automate:teams-meeting-note", contentOrigin: "ai-derived" },
-		{ folder: "06-Career/Transcripts/General", author: "power-automate:teams-transcript", contentOrigin: "primary", filenamePattern: "^Transcript-" },
-		{ folder: "06-Career/Transcripts/General", author: "power-automate:teams-meeting-note", contentOrigin: "ai-derived", filenamePattern: "^(MeetingNotes-|Meeting Note-)" },
-	],
+	ignoreFolders: ["Templates", "Excalidraw", ".obsidian"],
+	ignoreFiles: [],
+	editLogsPath: "Authorship Logs",
+	logRetentionDays: 0,
+	autoImportFolders: [],
 };
-
-// ─── LRU Cache ────────────────────────────────────────────────────────────────
-
-class LRUCache<K, V> {
-	private maxSize: number;
-	private cache: Map<K, V>;
-
-	constructor(maxSize: number) {
-		this.maxSize = maxSize;
-		this.cache = new Map();
-	}
-
-	get(key: K): V | undefined {
-		if (!this.cache.has(key)) return undefined;
-		const value = this.cache.get(key)!;
-		this.cache.delete(key);
-		this.cache.set(key, value);
-		return value;
-	}
-
-	set(key: K, value: V): void {
-		if (this.cache.has(key)) {
-			this.cache.delete(key);
-		} else if (this.cache.size >= this.maxSize) {
-			const firstKey = this.cache.keys().next().value;
-			if (firstKey !== undefined) this.cache.delete(firstKey);
-		}
-		this.cache.set(key, value);
-	}
-
-	resize(newMax: number): void {
-		this.maxSize = newMax;
-		while (this.cache.size > this.maxSize) {
-			const firstKey = this.cache.keys().next().value;
-			if (firstKey !== undefined) this.cache.delete(firstKey);
-		}
-	}
-}
-
-// ─── Diff Utilities ───────────────────────────────────────────────────────────
-
-interface SectionMap {
-	[heading: string]: string[];
-}
-
-function parseIntoSections(content: string): SectionMap {
-	const lines = content.split("\n");
-	const sections: SectionMap = {};
-	let currentHeading = "";
-
-	for (const line of lines) {
-		if (line.startsWith("## ")) {
-			currentHeading = line.slice(3).trim();
-			if (!sections[currentHeading]) sections[currentHeading] = [];
-		} else {
-			if (!sections[currentHeading]) sections[currentHeading] = [];
-			sections[currentHeading].push(line);
-		}
-	}
-	return sections;
-}
-
-function generateDiffSummary(before: string, after: string): string {
-	const beforeSections = parseIntoSections(before);
-	const afterSections = parseIntoSections(after);
-	const beforeKeys = Object.keys(beforeSections);
-	const afterKeys = Object.keys(afterSections);
-	const hasHeadings = afterKeys.some((k) => k !== "");
-
-	if (!hasHeadings) {
-		const beforeLines = before.split("\n").length;
-		const afterLines = after.split("\n").length;
-		const delta = afterLines - beforeLines;
-		const sign = delta >= 0 ? `+${delta}` : `${delta}`;
-		return `Modified content (${sign} lines)`;
-	}
-
-	const parts: string[] = [];
-
-	for (const key of afterKeys) {
-		if (key === "") continue;
-		if (!beforeSections[key]) {
-			parts.push(`added ## ${key}`);
-		}
-	}
-
-	for (const key of beforeKeys) {
-		if (key === "") continue;
-		if (!afterSections[key]) {
-			parts.push(`removed ## ${key}`);
-		}
-	}
-
-	for (const key of afterKeys) {
-		if (!beforeSections[key]) continue;
-		const beforeContent = beforeSections[key].join("\n");
-		const afterContent = afterSections[key].join("\n");
-		if (beforeContent !== afterContent) {
-			const beforeCount = beforeSections[key].filter((l) => l.trim()).length;
-			const afterCount = afterSections[key].filter((l) => l.trim()).length;
-			const delta = afterCount - beforeCount;
-			const sign = delta >= 0 ? `+${delta}` : `${delta}`;
-			const label = key !== "" ? `## ${key}` : "preamble";
-			parts.push(`Modified ${label} (${sign} lines)`);
-		}
-	}
-
-	return parts.length > 0
-		? parts.join(", ")
-		: "Minor edits (no structural changes)";
-}
 
 // ─── JSONL Log Entry ──────────────────────────────────────────────────────────
 
@@ -182,6 +76,7 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 	private _contentCache: LRUCache<string, string>;
 	private _debounceTimers: Map<string, ReturnType<typeof setTimeout>> =
 		new Map();
+	private _lastNoticeTime = 0;
 
 	async onload() {
 		await this.loadSettings();
@@ -189,8 +84,8 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 			this.settings.maxCacheSize,
 		);
 
-		// editor-change: fires ONLY when user types in the editor
-		// External writes (Claude CLI, PowerShell, OneDrive sync) do NOT trigger this
+		// editor-change: fires ONLY when the user types in the editor.
+		// External writes (CLI tools, automation, cloud sync) do NOT trigger it.
 		this.registerEvent(
 			this.app.workspace.on(
 				"editor-change",
@@ -207,11 +102,12 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 					if (existing) clearTimeout(existing);
 
 					// Capture file path for stale-reference safety check
-				const filePath = file.path;
-				const timer = setTimeout(() => {
+					const filePath = file.path;
+					const timer = setTimeout(() => {
 						this._debounceTimers.delete(filePath);
 						// Verify the editor is still showing the same file
-						const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+						const activeView =
+							this.app.workspace.getActiveViewOfType(MarkdownView);
 						if (activeView?.file?.path === filePath) {
 							this.handleEdit(activeView.editor, activeView.file);
 						}
@@ -222,7 +118,7 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 			),
 		);
 
-		// Cache content when user opens/focuses a note (for diff computation)
+		// Cache content when the user opens/focuses a note (for diff computation).
 		this.registerEvent(
 			this.app.workspace.on("active-leaf-change", (leaf) => {
 				if (!leaf) return;
@@ -237,16 +133,14 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 						this._contentCache.set(file.path, content);
 					})
 					.catch(() => {
-						// Non-critical — diff will use fallback
+						// Non-critical — diff will use a fallback summary.
 					});
 			}),
 		);
 
-		// Auto-import detection ONLY — wrapped in onLayoutReady to prevent
-		// the initial vault-indexing stampede where vault.on('create') fires
-		// for every file during plugin load.
-		// Non-auto-import files get created_by from first editor-change (Bryan)
-		// or from Claude's PostToolUse hook.
+		// Auto-import detection ONLY — wrapped in onLayoutReady to avoid the
+		// initial vault-indexing stampede where vault.on('create') fires for
+		// every existing file during plugin load.
 		this.app.workspace.onLayoutReady(() => {
 			this.registerEvent(
 				this.app.vault.on("create", (file) => {
@@ -254,25 +148,59 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 					if (file.extension !== "md") return;
 					if (this.shouldIgnore(file)) return;
 
-					// ONLY stamp if file matches an auto-import folder
-					const result = this.getAutoImportResult(file);
-					if (!result) return; // Skip — not an auto-import
+					// ONLY stamp if the file matches an auto-import folder.
+					const result = getAutoImportResult(
+						this.settings.autoImportFolders,
+						file.path,
+						file.name,
+					);
+					if (!result) return;
 
 					const createPath = file.path;
 					setTimeout(() => {
-						const currentFile = this.app.vault.getAbstractFileByPath(createPath);
+						const currentFile =
+							this.app.vault.getAbstractFileByPath(createPath);
 						if (currentFile instanceof TFile) {
 							this.handleCreate(currentFile);
 						}
-					}, 3000);
+					}, AUTO_IMPORT_STAMP_DELAY_MS);
 				}),
 			);
+
+			// Prune old logs once, after the vault is ready (no-op unless the
+			// user has enabled retention).
+			this.pruneLogs();
 		});
 
-		this.addSettingTab(
-			new AuthorshipTrackerSettingTab(this.app, this),
-		);
-		console.log("[AuthorshipTracker] Plugin loaded");
+		this.addCommand({
+			id: "stamp-current-note",
+			name: "Stamp authorship on current note",
+			editorCallback: (editor: Editor, ctx) => {
+				const file = ctx.file;
+				if (file instanceof TFile) {
+					this.handleEdit(editor, file);
+				}
+			},
+		});
+
+		this.addCommand({
+			id: "open-todays-log",
+			name: "Open today's authorship log",
+			callback: async () => {
+				const dir = normalizePath(this.settings.editLogsPath);
+				const logPath = normalizePath(
+					`${dir}/${localDateString(new Date())}.jsonl`,
+				);
+				const file = this.app.vault.getAbstractFileByPath(logPath);
+				if (file instanceof TFile) {
+					await this.app.workspace.getLeaf(false).openFile(file);
+				} else {
+					new Notice("No authorship log for today yet.");
+				}
+			},
+		});
+
+		this.addSettingTab(new AuthorshipTrackerSettingTab(this.app, this));
 	}
 
 	onunload() {
@@ -280,38 +208,26 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 			clearTimeout(timer);
 		}
 		this._debounceTimers.clear();
-		console.log("[AuthorshipTracker] Plugin unloaded");
+	}
+
+	private authorName(): string {
+		return this.settings.authorName.trim() || FALLBACK_AUTHOR;
 	}
 
 	private shouldIgnore(file: TFile): boolean {
-		if (this.settings.ignoreFiles.includes(file.name)) return true;
-		for (const folder of this.settings.ignoreFolders) {
-			if (file.path.startsWith(folder + "/")) return true;
-		}
-		return false;
-	}
-
-	/**
-	 * Check if a file is in an auto-import folder (Power Automate, etc).
-	 * Returns the mapped author + contentOrigin, or null if not an auto-import.
-	 * For folders with filenamePattern, only matches if the filename matches the regex.
-	 */
-	private getAutoImportResult(file: TFile): { author: string; contentOrigin: string } | null {
-		for (const mapping of this.settings.autoImportFolders) {
-			if (!file.path.startsWith(mapping.folder + "/")) continue;
-			if (mapping.filenamePattern) {
-				const pattern = new RegExp(mapping.filenamePattern);
-				if (!pattern.test(file.name)) continue;
-			}
-			return { author: mapping.author, contentOrigin: mapping.contentOrigin ?? "primary" };
-		}
-		return null;
+		return shouldIgnoreFile(
+			file.path,
+			file.name,
+			this.settings.ignoreFiles,
+			this.settings.ignoreFolders,
+		);
 	}
 
 	private async handleEdit(editor: Editor, file: TFile) {
+		if (this._stampInProgress.has(file.path)) return;
 		this._stampInProgress.add(file.path);
-		setTimeout(() => this._stampInProgress.delete(file.path), 1000);
 
+		const author = this.authorName();
 		const currentContent = editor.getValue();
 		const cachedContent = this._contentCache.get(file.path) ?? "";
 
@@ -324,13 +240,24 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 
 		try {
 			await this.app.fileManager.processFrontMatter(file, (fm) => {
-				// If created_by is absent, this is Bryan's first edit of a file
-				// without a creator stamp — credit him as creator
+				// Only claim creation if no creator is recorded yet AND the file
+				// is not owned by an auto-import mapping (whose create handler
+				// sets the authoritative origin). Never overwrite an existing
+				// content_origin.
 				if (!fm["created_by"]) {
-					fm["created_by"] = this.settings.authorName;
-					fm["content_origin"] = "human-authored";
+					const auto = getAutoImportResult(
+						this.settings.autoImportFolders,
+						file.path,
+						file.name,
+					);
+					if (!auto) {
+						fm["created_by"] = author;
+						if (!fm["content_origin"]) {
+							fm["content_origin"] = "human-authored";
+						}
+					}
 				}
-				fm["last_modified_by"] = this.settings.authorName;
+				fm["last_modified_by"] = author;
 				fm["edit_count"] =
 					typeof fm["edit_count"] === "number"
 						? fm["edit_count"] + 1
@@ -338,24 +265,30 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 			});
 
 			await this.appendLog({
-				ts: new Date().toISOString().replace(/\.\d{3}Z$/, ""),
-				file: file.path.replace(/\\/g, "/"),
-				author: this.settings.authorName,
+				ts: formatLocalTimestamp(new Date()),
+				file: file.path,
+				author,
 				action: "modified",
 				summary,
 			});
 		} catch (err) {
-			console.error("[AuthorshipTracker] Error stamping edit:", err);
+			this.notifyError("Failed to stamp edit", err);
+		} finally {
+			this._stampInProgress.delete(file.path);
 		}
 	}
 
 	private async handleCreate(file: TFile) {
+		if (this._stampInProgress.has(file.path)) return;
 		this._stampInProgress.add(file.path);
-		setTimeout(() => this._stampInProgress.delete(file.path), 1000);
 
-		// Determine author + content origin: auto-import source or human user
-		const result = this.getAutoImportResult(file);
-		const author = result?.author ?? this.settings.authorName;
+		// Determine author + content origin from the auto-import mapping.
+		const result = getAutoImportResult(
+			this.settings.autoImportFolders,
+			file.path,
+			file.name,
+		);
+		const author = result?.author ?? this.authorName();
 		const contentOrigin = result?.contentOrigin ?? "human-authored";
 		const summary = result
 			? `Auto-imported from ${author}`
@@ -370,7 +303,9 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 					return;
 				}
 				fm["created_by"] = author;
-				fm["content_origin"] = contentOrigin;
+				if (!fm["content_origin"]) {
+					fm["content_origin"] = contentOrigin;
+				}
 			});
 
 			if (!alreadyHasField) {
@@ -378,46 +313,86 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 				this._contentCache.set(file.path, content);
 
 				await this.appendLog({
-					ts: new Date().toISOString().replace(/\.\d{3}Z$/, ""),
-					file: file.path.replace(/\\/g, "/"),
+					ts: formatLocalTimestamp(new Date()),
+					file: file.path,
 					author,
 					action: "created",
 					summary,
 				});
 			}
 		} catch (err) {
-			console.error(
-				"[AuthorshipTracker] Error stamping creation:",
-				err,
-			);
+			this.notifyError("Failed to stamp creation", err);
+		} finally {
+			this._stampInProgress.delete(file.path);
 		}
 	}
 
 	private async appendLog(entry: LogEntry): Promise<void> {
-		const today = new Date().toISOString().slice(0, 10);
-		const logPath = `${this.settings.editLogsPath}/${today}.jsonl`;
+		const dir = normalizePath(this.settings.editLogsPath);
+		const logPath = normalizePath(
+			`${dir}/${localDateString(new Date())}.jsonl`,
+		);
 		const line = JSON.stringify(entry) + "\n";
 
 		try {
-			const folder = this.app.vault.getAbstractFileByPath(
-				this.settings.editLogsPath,
-			);
+			const folder = this.app.vault.getAbstractFileByPath(dir);
 			if (!folder) {
-				await this.app.vault.createFolder(this.settings.editLogsPath);
+				try {
+					await this.app.vault.createFolder(dir);
+				} catch {
+					// May already exist due to a concurrent create — ignore.
+				}
 			}
 
-			const existingFile =
-				this.app.vault.getAbstractFileByPath(logPath);
+			const existingFile = this.app.vault.getAbstractFileByPath(logPath);
 			if (existingFile instanceof TFile) {
-				await this.app.vault.adapter.append(logPath, line);
+				// Atomic read-modify-write avoids interleaved-append races.
+				await this.app.vault.process(existingFile, (data) => data + line);
 			} else {
-				await this.app.vault.create(logPath, line);
+				try {
+					await this.app.vault.create(logPath, line);
+				} catch {
+					// Lost the create race — append to the now-existing file.
+					const f = this.app.vault.getAbstractFileByPath(logPath);
+					if (f instanceof TFile) {
+						await this.app.vault.process(f, (data) => data + line);
+					}
+				}
 			}
 		} catch (err) {
-			console.error(
-				"[AuthorshipTracker] Failed to write log entry:",
-				err,
-			);
+			this.notifyError("Failed to write authorship log", err);
+		}
+	}
+
+	private async pruneLogs(): Promise<void> {
+		const days = this.settings.logRetentionDays;
+		if (!days || days <= 0) return;
+
+		const dir = normalizePath(this.settings.editLogsPath);
+		const folder = this.app.vault.getAbstractFileByPath(dir);
+		if (!(folder instanceof TFolder)) return;
+
+		const cutoff = Date.now() - days * 86400000;
+		for (const child of folder.children) {
+			if (!(child instanceof TFile)) continue;
+			if (!/^\d{4}-\d{2}-\d{2}\.jsonl$/.test(child.name)) continue;
+			const t = Date.parse(child.name.slice(0, 10) + "T00:00:00");
+			if (!isNaN(t) && t < cutoff) {
+				try {
+					await this.app.vault.delete(child);
+				} catch (err) {
+					this.notifyError("Failed to prune old log", err);
+				}
+			}
+		}
+	}
+
+	private notifyError(message: string, err: unknown): void {
+		console.error(`[authorship-tracker] ${message}:`, err);
+		const now = Date.now();
+		if (now - this._lastNoticeTime > NOTICE_THROTTLE_MS) {
+			this._lastNoticeTime = now;
+			new Notice(`Authorship Tracker: ${message}.`);
 		}
 	}
 
@@ -448,28 +423,26 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl("h2", { text: "Authorship Tracker Settings" });
 
 		new Setting(containerEl)
 			.setName("Author name")
 			.setDesc(
-				"Name to stamp in last_modified_by and created_by fields",
+				"Name to stamp in the last_modified_by and created_by fields.",
 			)
 			.addText((text) =>
 				text
-					.setPlaceholder("bryan")
+					.setPlaceholder("me")
 					.setValue(this.plugin.settings.authorName)
 					.onChange(async (value) => {
-						this.plugin.settings.authorName =
-							value.trim() || "bryan";
+						this.plugin.settings.authorName = value.trim();
 						await this.plugin.saveSettings();
 					}),
 			);
 
 		new Setting(containerEl)
-			.setName("Debounce delay (ms)")
+			.setName("Debounce delay")
 			.setDesc(
-				"How long to wait after last keystroke before stamping (default: 10000)",
+				"Milliseconds to wait after the last keystroke before stamping (minimum 1000).",
 			)
 			.addText((text) =>
 				text
@@ -485,9 +458,9 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Cache size (max entries)")
+			.setName("Cache size")
 			.setDesc(
-				"Maximum number of file snapshots to keep in memory for diff computation",
+				"Maximum number of file snapshots to keep in memory for diff computation.",
 			)
 			.addText((text) =>
 				text
@@ -505,7 +478,7 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Ignored folders")
 			.setDesc(
-				"Comma-separated list of folder names to ignore (no stamping)",
+				"Comma-separated folder names to exclude from tracking, matched at any depth.",
 			)
 			.addTextArea((text) =>
 				text
@@ -523,11 +496,11 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Ignored files")
 			.setDesc(
-				"Comma-separated list of file names to ignore (no stamping)",
+				"Comma-separated file names to exclude from tracking.",
 			)
 			.addTextArea((text) =>
 				text
-					.setPlaceholder("CLAUDE.md, GEMINI.md")
+					.setPlaceholder("secret.md, scratch.md")
 					.setValue(this.plugin.settings.ignoreFiles.join(", "))
 					.onChange(async (value) => {
 						this.plugin.settings.ignoreFiles = value
@@ -540,64 +513,80 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Edit logs path")
-			.setDesc(
-				"Vault-relative path where daily JSONL logs are written",
-			)
+			.setDesc("Vault-relative folder where daily JSONL logs are written.")
 			.addText((text) =>
 				text
-					.setPlaceholder("99-System/Edit-Logs")
+					.setPlaceholder("Authorship Logs")
 					.setValue(this.plugin.settings.editLogsPath)
 					.onChange(async (value) => {
-						this.plugin.settings.editLogsPath =
-							value.trim() || "99-System/Edit-Logs";
+						const trimmed = value.trim();
+						if (!trimmed) {
+							new Notice(
+								"Authorship Tracker: edit logs path cannot be empty.",
+							);
+							return;
+						}
+						this.plugin.settings.editLogsPath = trimmed;
 						await this.plugin.saveSettings();
 					}),
 			);
 
-		containerEl.createEl("h3", { text: "Auto-Import Folders" });
-		containerEl.createEl("p", {
-			text: "Files created in these folders are stamped with the mapped author and content origin. Format: folder=author|contentOrigin[|filenamePattern]",
+		new Setting(containerEl)
+			.setName("Log retention")
+			.setDesc(
+				"Delete daily logs older than this many days. Set to 0 to keep all logs.",
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("0")
+					.setValue(String(this.plugin.settings.logRetentionDays))
+					.onChange(async (value) => {
+						const parsed = parseInt(value);
+						if (!isNaN(parsed) && parsed >= 0) {
+							this.plugin.settings.logRetentionDays = parsed;
+							await this.plugin.saveSettings();
+						}
+					}),
+			);
+
+		new Setting(containerEl).setName("Auto-import folders").setHeading();
+
+		const desc = containerEl.createEl("p", {
 			cls: "setting-item-description",
 		});
+		desc.setText(
+			"Files created in these folders are stamped with the mapped author and content origin. One mapping per line: Folder=Author|ContentOrigin[|FilenamePattern].",
+		);
 
 		new Setting(containerEl)
 			.setName("Folder-to-author mappings")
 			.setDesc(
-				"One per line: Folder=Author|ContentOrigin[|FilenamePattern] (e.g. Emails=power-automate:email|primary)",
+				"Example: Emails=importer:email|primary. The optional third field is a regex matched against the file name.",
 			)
 			.addTextArea((text) => {
 				text.inputEl.rows = 8;
 				text.inputEl.cols = 50;
 				text
 					.setPlaceholder(
-						"Emails=power-automate:email|primary\nTeamsChats/messages=power-automate:teams|primary",
+						"Emails=importer:email|primary\nMeetings=importer:transcript|primary|^Transcript-",
 					)
 					.setValue(
-						this.plugin.settings.autoImportFolders
-							.map((m) => m.folder + "=" + m.author + "|" + m.contentOrigin + (m.filenamePattern ? "|" + m.filenamePattern : ""))
-							.join("\n"),
+						serializeMappings(
+							this.plugin.settings.autoImportFolders,
+						),
 					)
 					.onChange(async (value) => {
-						this.plugin.settings.autoImportFolders = value
-							.split("\n")
-							.map((line) => line.trim())
-							.filter((line) => line.includes("="))
-							.map((line) => {
-								const eqIdx = line.indexOf("=");
-								const folder = line.slice(0, eqIdx).trim();
-								const rest = line.slice(eqIdx + 1).trim();
-								const parts = rest.split("|");
-								const mapping: AutoImportMapping = {
-									folder,
-									author: parts[0]?.trim() || "",
-									contentOrigin: parts[1]?.trim() || "primary",
-								};
-								if (parts[2]?.trim()) {
-									mapping.filenamePattern = parts[2].trim();
-								}
-								return mapping;
-							})
-							.filter((m) => m.folder && m.author);
+						const mappings = parseMappings(value);
+						const bad = invalidPatterns(mappings);
+						if (bad.length > 0) {
+							new Notice(
+								`Authorship Tracker: invalid filename pattern(s): ${bad.join(
+									", ",
+								)}`,
+							);
+							return;
+						}
+						this.plugin.settings.autoImportFolders = mappings;
 						await this.plugin.saveSettings();
 					});
 			});
