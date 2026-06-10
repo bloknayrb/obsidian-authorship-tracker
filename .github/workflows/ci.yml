@@ -23,7 +23,7 @@ jobs:
         run: npm run lint
 
       - name: Typecheck
-        run: tsc -noEmit -skipLibCheck -p tsconfig.json
+        run: npx tsc -noEmit -skipLibCheck -p tsconfig.json
 
       - name: Test
         run: npm test
