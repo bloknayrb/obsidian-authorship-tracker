@@ -1,174 +1,206 @@
-# Obsidian Authorship Tracker
+# Authorship Tracker
 
-Track who creates and modifies notes in your Obsidian vault. Designed for vaults where humans, AI agents, and automation all edit files — and you need to know who did what.
+Know whether a note in your vault was written by **you**, by an **AI assistant**, or
+by **automation**. Authorship Tracker stamps lightweight provenance metadata onto your
+notes and keeps a daily, human-readable log of who changed what.
 
-## The Problem
+It is built for vaults where more than one "author" touches your notes — you typing in
+Obsidian, an AI assistant editing files through a CLI, or a script importing emails and
+transcripts — and you want to keep those contributions straight.
 
-In a collaborative vault, notes get created and modified by multiple sources: you typing in Obsidian, AI assistants editing via CLI, Power Automate importing emails, overnight scripts updating metadata. Without tracking, every note looks the same regardless of who wrote it. This makes it impossible to:
+## Why you might want this
 
-- Know if you're reading your own words or AI-generated content
-- Apply appropriate trust levels when citing notes in deliverables
+In a mixed-authorship vault, every note looks the same regardless of who wrote it. That
+makes it hard to:
+
+- Tell whether you are reading your own words or AI-generated text
+- Decide how much to trust a note when citing it elsewhere
 - Audit which automation touched which files
-- Prevent circular citations (citing AI output as if it were a primary source)
+- Avoid citing AI output as if it were a primary source
 
-## How It Works
+Authorship Tracker answers "who wrote this, and how trustworthy is it?" without you
+having to think about it.
 
-The plugin stamps lightweight YAML frontmatter fields on every note it touches:
+## How it works
+
+When you type in a note, the plugin stamps a few YAML frontmatter fields:
 
 ```yaml
-created_by: bryan
-last_modified_by: claude-interactive
+created_by: me
+last_modified_by: me
 edit_count: 7
 content_origin: human-authored
 ```
 
-It also writes detailed entries to a daily JSONL log with section-level diff summaries.
+It also appends a line to a daily [JSONL](https://jsonlines.org/) log with a short,
+section-level summary of what changed.
 
-### Key Design Decision: `editor-change` Only
+### It only reacts to *your* typing
 
-The plugin uses Obsidian's `editor-change` event, which **fires only when you type in the editor**. External file modifications — from CLI tools, scripts, cloud sync, or AI agents writing via the filesystem — do **not** trigger this event. This single decision eliminates the entire class of false-attribution bugs that would occur if the plugin listened to `vault.on('modify')`.
+The plugin listens to Obsidian's `editor-change` event, which fires **only when you type
+in the editor**. Edits made outside Obsidian — by a CLI tool, a sync client, a script,
+or an AI agent writing to the filesystem — do **not** trigger it. That single decision
+avoids a whole class of false-attribution bugs, and it is what lets the plugin
+coexist with external writers (see [Integrating external writers](#integrating-external-writers-optional)).
 
-### Auto-Import Detection
+### Auto-import detection
 
-Files arriving in designated folders (e.g., Power Automate email imports) are detected via `vault.on('create')` and stamped with the appropriate source author. This handler is wrapped in `onLayoutReady()` to prevent the initial vault-indexing stampede that would otherwise fire create events for every existing file when the plugin first loads.
+If you have folders that receive files from an external source (an email importer, a
+meeting-transcript pipeline, etc.), you can map those folders to a source name and a
+trust level. Files created there are stamped automatically. This is detected via
+`vault.on('create')`, wrapped in `onLayoutReady()` so the plugin does not stampede over
+every existing file when it first loads.
 
-### First-Edit Creator Attribution
+### First-edit creator attribution
 
-When you type in a file that has no `created_by` field, the plugin stamps you as the creator. This means you only get credited as creator when you actually interact with the file — not when it appears in the vault.
+When you type in a note that has no `created_by` field yet, the plugin records you as the
+creator — but only when you actually edit it, not merely because the file exists.
 
-## YAML Fields
+## The fields it writes
 
-| Field | Purpose | Set By |
-|-------|---------|--------|
-| `created_by` | Who originally created the file | Plugin (first edit or auto-import), Claude hooks, automation |
-| `last_modified_by` | Who last edited the file | Plugin (human edits), Claude hooks (AI edits) |
-| `edit_count` | Total number of modifications | All channels increment |
-| `content_origin` | Trust level of the content itself | Plugin (auto-import), Claude hooks, audit scripts |
+| Field | Meaning |
+|-------|---------|
+| `created_by` | Who originally created the note |
+| `last_modified_by` | Who last edited it |
+| `edit_count` | Number of tracked modifications |
+| `content_origin` | How trustworthy the *content* is, independent of who created the file |
 
-### Author Values
+### Suggested `content_origin` values
 
-| Value | Source |
-|-------|--------|
-| `bryan` (configurable) | Human typing in Obsidian |
-| `claude-interactive` | Claude Code main session |
-| `claude-opus` / `claude-sonnet` / `claude-haiku` | Claude subagents |
-| `power-automate:email` | Email imports |
-| `power-automate:teams` | Teams message imports |
-| `power-automate:teams-transcript` | Meeting transcripts (verbatim speech-to-text) |
-| `power-automate:teams-meeting-note` | Teams Copilot AI meeting summaries |
-| `automation:<name>` | Overnight scripts |
+These are conventions, not enforced — use whatever vocabulary fits your workflow:
 
-### Content Origin Values
-
-Classifies the provenance of the content, separate from who created the file.
-
-| Value | Trust Level | Example |
+| Value | Trust level | Example |
 |-------|-------------|---------|
-| `primary` | Highest — citable as source | Verbatim emails, transcripts, specs |
-| `human-authored` | High — first-person knowledge | Notes you wrote yourself |
-| `ai-derived` | Medium — trace to primary source | Meeting notes from transcripts, summaries |
-| `ai-generated` | Low — requires verification | AI analysis, recommendations, reviews |
-| `metadata` | N/A — not citable content | Task status, state files, dashboards |
+| `primary` | Highest — citable as a source | Verbatim emails, transcripts, specs |
+| `human-authored` | High — your own first-person knowledge | Notes you wrote yourself |
+| `ai-derived` | Medium — traceable to a primary source | Meeting notes generated from a transcript |
+| `ai-generated` | Low — verify before relying on it | AI analysis, recommendations |
+| `metadata` | Not citable content | Status files, dashboards |
 
-## JSONL Log Format
+## The daily log
 
-Daily logs are written to `<editLogsPath>/YYYY-MM-DD.jsonl`:
+Logs are written to `<edit logs path>/YYYY-MM-DD.jsonl` (timestamps are local time):
 
 ```json
-{"ts":"2026-03-19T14:30:00","file":"TaskNotes/Review-DRPA-docs.md","author":"bryan","action":"modified","summary":"Modified ## Acceptance Criteria (+3 lines)"}
-{"ts":"2026-03-19T14:35:00","file":"TaskNotes/Review-DRPA-docs.md","author":"claude-interactive","action":"modified","summary":"Replaced 4 lines with 6 lines"}
+{"ts":"2026-03-19T14:30:00","file":"Tasks/Review-docs.md","author":"me","action":"modified","summary":"Modified ## Acceptance Criteria (+3 lines)"}
 ```
 
-The diff summary uses section-level comparison (by `##` headings) when headings exist, falling back to line-count stats for flat documents.
+The summary compares the note by its `##` headings when it has them, and falls back to a
+line-count delta for flat documents.
 
-## Three-Channel Architecture
+## Commands
 
-This plugin is one channel in a broader authorship tracking system. All three channels write to the same YAML fields and JSONL format:
-
-| Channel | Captures | Mechanism |
-|---------|----------|-----------|
-| **This plugin** | Human edits in Obsidian | `editor-change` event (typing only) |
-| **Claude Code hooks** | AI agent edits via CLI | PostToolUse → temp JSONL → Stop hook batch consolidation |
-| **PowerShell scripts** | Overnight automation, auto-imports | Direct YAML insertion + JSONL append |
-
-The channels are designed to not conflict:
-- Plugin uses `editor-change` (human typing) — external writes don't trigger it
-- Claude hooks use PostToolUse (CLI tool calls) — Obsidian events don't trigger them
-- PowerShell scripts run on schedule — no event-driven conflicts
-
-## Auto-Import Folder Mappings
-
-Files created in these folders are automatically attributed to the mapped source:
-
-| Folder | Author | Content Origin | Filename Pattern |
-|--------|--------|---------------|-----------------|
-| `Emails/` | `power-automate:email` | `primary` | — |
-| `TeamsChats/messages/` | `power-automate:teams` | `primary` | — |
-| `Transcripts/Processed Transcripts/` | `power-automate:teams-transcript` | `primary` | — |
-| `Transcripts/Completed Notes/` | `power-automate:teams-meeting-note` | `ai-derived` | — |
-| `Transcripts/General/` | `power-automate:teams-transcript` | `primary` | `^Transcript-` |
-| `Transcripts/General/` | `power-automate:teams-meeting-note` | `ai-derived` | `^(MeetingNotes-\|Meeting Note-)` |
-
-Files in `General/` matching neither pattern fall through all mappings and receive no stamp — they are handled by other channels. Configurable in Settings.
+| Command | What it does |
+|---------|--------------|
+| **Stamp authorship on current note** | Manually stamp the active note now, without waiting for the debounce |
+| **Open today's authorship log** | Open today's JSONL log file |
 
 ## Settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Author name | `bryan` | Your name for attribution |
-| Debounce delay | `10000` ms | Wait after last keystroke before stamping |
-| Cache size | `50` | Max file snapshots for diff computation (LRU) |
-| Ignored folders | Templates, Excalidraw, .obsidian, ... | Folders excluded from tracking |
-| Ignored files | CLAUDE.md, GEMINI.md, ... | Files excluded from tracking |
-| Edit logs path | `99-System/Edit-Logs` | Where daily JSONL logs are written |
-| Auto-import mappings | (see above) | Format: `Folder=Author\|ContentOrigin[\|FilenamePattern]` |
+| Author name | _(empty → `me`)_ | The name stamped for your edits |
+| Debounce delay | `10000` ms | How long after your last keystroke before stamping |
+| Cache size | `50` | How many note snapshots to keep in memory for diffs (LRU) |
+| Ignored folders | Templates, Excalidraw, .obsidian | Folders excluded from tracking (matched at any depth) |
+| Ignored files | _(none)_ | File names excluded from tracking |
+| Edit logs path | `Authorship Logs` | Where daily JSONL logs are written |
+| Log retention | `0` (keep all) | Delete logs older than N days |
+| Auto-import folders | _(none)_ | Folder → source mappings (see below) |
 
-## Dataview Queries
+### Auto-import folder mappings
+
+Each mapping is one line in settings:
+
+```
+Folder=Author|ContentOrigin[|FilenamePattern]
+```
+
+For example:
+
+```
+Emails=importer:email|primary
+Meetings=importer:transcript|primary|^Transcript-
+Meetings=importer:notes|ai-derived|^Notes-
+```
+
+The optional third field is a regular expression matched against the file name, so a
+single folder can route different file types to different sources. Files that match no
+mapping are left untouched.
+
+## Querying the data
+
+Because everything is plain frontmatter, you can query it with
+[Dataview](https://github.com/blacksmithgu/obsidian-dataview):
 
 ```dataview
 TABLE last_modified_by, edit_count, content_origin
-FROM ""
-WHERE last_modified_by = "bryan" AND date(updated) = date(today)
-SORT file.mtime DESC
-```
-
-```dataview
-LIST
 FROM ""
 WHERE content_origin = "ai-generated"
 SORT file.mtime DESC
 LIMIT 20
 ```
 
+## Integrating external writers (optional)
+
+The plugin only captures *your* typing inside Obsidian. If you also want to track edits
+made by AI assistants or scripts, have those writers stamp the **same frontmatter fields**
+and append to the **same JSONL format**. Because the plugin ignores non-editor writes,
+the channels do not conflict:
+
+- **This plugin** — your edits in Obsidian (`editor-change`)
+- **An AI assistant** (e.g. a Claude Code `PostToolUse` hook) — edits made via the CLI
+- **Automation** (e.g. a scheduled PowerShell/Python script) — imports and bulk updates,
+  writing YAML directly and appending log lines
+
+This is just a pattern — nothing about it ships with or is required by the plugin. The
+author's own setup uses Claude Code hooks plus PowerShell scripts feeding the auto-import
+folders above; adapt it to whatever tools you use.
+
 ## Installation
 
-### From Source
+### From the community plugins list
+
+Once accepted: **Settings → Community plugins → Browse → "Authorship Tracker" → Install →
+Enable**.
+
+### Manual
+
+1. Download `main.js`, `manifest.json`, and `styles.css` from the
+   [latest release](../../releases/latest).
+2. Copy them into `<vault>/.obsidian/plugins/authorship-tracker/`.
+3. Reload Obsidian and enable the plugin under **Settings → Community plugins**.
+
+### From source
 
 ```bash
 npm install
 npm run build
 ```
 
-Copy `main.js`, `manifest.json`, and `styles.css` to your vault's `.obsidian/plugins/obsidian-authorship-tracker/` directory.
+Then copy `main.js`, `manifest.json`, and `styles.css` into
+`<vault>/.obsidian/plugins/authorship-tracker/`.
 
-**Note**: If your vault path contains special characters (like `&`), build in a temp directory:
+## Known limitations
+
+- **No retroactive attribution** — only edits going forward are tracked.
+- **`content_origin` is set at creation** — heavily revising an AI-generated note does
+  not change its origin. This is intentional: original provenance is what matters for
+  citation decisions.
+
+## Development
 
 ```bash
-cp main.ts package.json tsconfig.json esbuild.config.mjs /tmp/build/
-cd /tmp/build && npm install && npm run build
-cp main.js /path/to/vault/.obsidian/plugins/obsidian-authorship-tracker/
+npm install      # install dependencies
+npm run dev      # build and watch
+npm run lint     # lint
+npm test         # run the unit tests
+npm run build    # typecheck + production build
 ```
 
-### Enable
-
-Settings > Community Plugins > Enable "Authorship Tracker". Reload Obsidian (Ctrl+R) if the plugin doesn't appear.
-
-## Known Limitations
-
-- **No retroactive attribution**: The plugin only tracks edits going forward. Use the companion audit scripts for historical classification.
-- **OneDrive sync can delay create events**: Files synced via OneDrive may trigger `vault.on('create')` with a delay, but attribution is still correct.
-- **Content origin is set at creation**: Editing a note doesn't change its `content_origin`. If an AI-generated document is heavily revised by a human, the origin still reads `ai-generated`. This is by design — the original provenance matters for citation decisions.
+The pure logic (diffing, the LRU cache, folder matching, mapping parsing, time
+formatting) lives in `src/` and is unit tested with [Vitest](https://vitest.dev/).
 
 ## License
 
-MIT
+[MIT](LICENSE)
