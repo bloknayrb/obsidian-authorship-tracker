@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 const root = resolve(__dirname, "..");
 const contractPath = resolve(root, "docs/agent-provenance-contract.md");
 const skillPath = resolve(root, "skills/obsidian-authorship-tracker/SKILL.md");
-const read = (path: string) => readFileSync(path, "utf8");
+const read = (path: string) => readFileSync(path, "utf8").replace(/\r\n/g, "\n");
 
 describe("agent provenance contract", () => {
 	it("ships a cooperative-provenance contract and portable skill", () => {

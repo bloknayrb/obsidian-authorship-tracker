@@ -1,7 +1,7 @@
 {
   "id": "authorship-tracker",
   "name": "Authorship Tracker",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "minAppVersion": "1.2.0",
   "description": "Tracks who creates and modifies notes — designed for human/AI collaborative vaults.",
   "author": "Bryan Kolb",

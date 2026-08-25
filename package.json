@@ -1,6 +1,6 @@
 {
   "name": "authorship-tracker",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Tracks who creates and modifies notes — designed for human/AI collaborative vaults.",
   "main": "main.js",
   "scripts": {
