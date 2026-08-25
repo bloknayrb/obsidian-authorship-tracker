@@ -25,8 +25,9 @@
 // time it. Blowup is exponential in the input length, so a pattern that is going
 // to hang on a real filename is already measurably slow on a 24-character probe,
 // while a linear one stays microscopic. Escalating lengths with an early bail
-// keep the check's own cost bounded (worst observed: ~400ms) rather than
-// exponential.
+// keep the check's own cost bounded rather than exponential. Measured worst case
+// for a single catastrophic pattern: ~800ms, paid once per pattern per session
+// because verdicts are cached.
 //
 // This is empirical, not a proof. It has no false positives on realistic
 // patterns and caught every catastrophic pattern tested, but it cannot promise
@@ -47,6 +48,10 @@ const PROBE_LENGTHS = [12, 18, 24];
 // Per-probe budget. Linear patterns finish in microseconds, so this is orders of
 // magnitude above the noise floor.
 const PROBE_BUDGET_MS = 20;
+
+// A reading beyond this multiple of the budget is taken at face value; anything
+// between the budget and this is re-measured in case it was a GC pause.
+const CONFIRM_THRESHOLD = 4;
 
 // Verdicts, bounded so settings churn cannot grow the cache without limit.
 // Caching the whole verdict rather than just the compiled regex matters: probing
@@ -247,11 +252,17 @@ function probePattern(pattern: string, now: () => number): Verdict {
 				// A pattern that throws mid-match is unusable.
 				return { re: null, problem: "invalid-syntax" };
 			}
-			if (now() - started > PROBE_BUDGET_MS) {
-				// One sample can be inflated by a GC pause, and a false "too-slow"
-				// silently disables a working mapping for the session. Re-measure
-				// before concluding. A genuinely exponential pattern is just as slow
-				// the second time; a hiccup is not.
+			const elapsed = now() - started;
+			if (elapsed > PROBE_BUDGET_MS) {
+				// A single sample can be inflated by a GC pause, and a false
+				// "too-slow" silently disables a working mapping for the session.
+				// So re-measure — but only when the reading is close enough to the
+				// budget for a pause to explain it. A pattern that took many times
+				// the budget is not a hiccup, and confirming it would double the
+				// cost of exactly the cases that are already the most expensive.
+				if (elapsed > PROBE_BUDGET_MS * CONFIRM_THRESHOLD) {
+					return { re: null, problem: "too-slow" };
+				}
 				const confirm = now();
 				try {
 					re.test(subject);

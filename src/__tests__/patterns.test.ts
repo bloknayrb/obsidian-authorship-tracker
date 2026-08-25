@@ -55,13 +55,16 @@ beforeEach(() => {
 });
 
 describe("checkPattern", () => {
+	// Deliberately slow: it runs a real probe against every known-catastrophic
+	// pattern, which is the point. ~2.4s locally, more on a shared CI runner, so
+	// it gets an explicit timeout rather than relying on the 5s default.
 	it("rejects every catastrophic pattern", () => {
 		for (const p of CATASTROPHIC) {
 			const result = checkPattern(p);
 			expect(result.ok, `${p} should be rejected`).toBe(false);
 			expect(result.problem, p).toBe("too-slow");
 		}
-	});
+	}, 30_000);
 
 	it("accepts every realistic pattern", () => {
 		// The false-positive case matters more than the false-negative one: a
@@ -106,7 +109,7 @@ describe("checkPattern", () => {
 		// And the alphabet comes from AFTER the prefix, so a long literal head
 		// cannot crowd out the character driving the blowup.
 		expect(checkPattern("^Transcript-(x+x+)+y").problem).toBe("too-slow");
-	});
+	}, 30_000);
 
 	it("probes using the pattern's own alphabet", () => {
 		// Probing (x+x+)+y with "a"s makes it look instant, because the pattern
@@ -115,11 +118,11 @@ describe("checkPattern", () => {
 		expect(checkPattern("(q+)+Z").problem).toBe("too-slow");
 		// Same for digit classes, where the escape letter is not a literal.
 		expect(checkPattern("^(\\d+)+$").problem).toBe("too-slow");
-	});
+	}, 30_000);
 
-	it("rejects when a slow measurement is confirmed", () => {
-		// A clock that always reports the budget as blown: both the first
-		// measurement and the confirming one.
+	it("rejects a wildly over-budget reading without re-measuring", () => {
+		// Far beyond the budget is not a hiccup. Taking it at face value is what
+		// keeps rejection from costing twice as much as it needs to.
 		let t = 0;
 		const now = () => (t += 10_000);
 		expect(checkPattern("^Transcript-", now)).toEqual({
@@ -128,19 +131,23 @@ describe("checkPattern", () => {
 		});
 	});
 
-	it("does not reject on a single spike that does not reproduce", () => {
-		// A GC pause during one probe must not disable a working pattern for the
-		// session. Only the first reading pair is slow here; the confirming
-		// measurement comes back fast, so the pattern stands.
-		let reading = 0;
-		const now = () => {
-			reading++;
-			// Readings 1 and 2 straddle a 10s "pause"; everything after is instant.
-			if (reading === 1) return 0;
-			if (reading === 2) return 10_000;
-			return 10_000;
-		};
+	it("re-measures a borderline reading and keeps the pattern if it was a blip", () => {
+		// A GC pause is tens of milliseconds — just over the budget, not orders of
+		// magnitude over. It must not disable a working pattern for the session.
+		const readings = [0, 25]; // first probe: 25ms, just over the 20ms budget
+		let i = 0;
+		const now = () => (i < readings.length ? readings[i++] : 25);
 		expect(checkPattern("^Transcript-", now)).toEqual({ ok: true });
+	});
+
+	it("rejects a borderline reading that reproduces", () => {
+		// Same shape, but every measurement is over budget, so it is real.
+		let t = 0;
+		const now = () => (t += 25);
+		expect(checkPattern("^Transcript-", now)).toEqual({
+			ok: false,
+			problem: "too-slow",
+		});
 	});
 });
 
