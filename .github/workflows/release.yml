@@ -18,9 +18,51 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
 
       - name: Install dependencies
         run: npm ci
+
+      # Obsidian requires the release tag to equal manifest.json's version
+      # exactly, with no "v" prefix, and its updater reads minAppVersion out of
+      # versions.json. A mismatch produces a release users cannot install, so
+      # this runs before anything is built or published.
+      #
+      # No "v" tolerance on purpose: npm's default tag-version-prefix is "v"
+      # while version-bump.mjs writes a bare version, so tolerating it would
+      # rubber-stamp the one mistake this tooling makes by default. .npmrc
+      # clears the prefix; this is the check that it stayed cleared.
+      - name: Verify tag matches manifest and package versions
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          manifest_version=$(node -p "require('./manifest.json').version")
+          package_version=$(node -p "require('./package.json').version")
+
+          if [ "$TAG" != "$manifest_version" ]; then
+            echo "::error::Tag '$TAG' does not match manifest.json version '$manifest_version'. Obsidian requires an exact match with no 'v' prefix."
+            exit 1
+          fi
+          if [ "$TAG" != "$package_version" ]; then
+            echo "::error::Tag '$TAG' does not match package.json version '$package_version'."
+            exit 1
+          fi
+
+          node -e "
+            const versions = require('./versions.json');
+            const manifest = require('./manifest.json');
+            const recorded = versions[manifest.version];
+            if (recorded !== manifest.minAppVersion) {
+              console.error(\`::error::versions.json maps \${manifest.version} to '\${recorded ?? "nothing"}' but manifest.json declares minAppVersion '\${manifest.minAppVersion}'. Run 'npm version' rather than editing manifest.json by hand.\`);
+              process.exit(1);
+            }
+          "
+
+      # The same gate CI runs: lint, typecheck against the real Obsidian API,
+      # typecheck the tests against the mock, and run the suite. Steps are
+      # fail-fast, so a failure here means the release below never happens.
+      - name: Verify
+        run: npm run verify
 
       - name: Build plugin
         run: node esbuild.config.mjs production
@@ -33,4 +75,5 @@ jobs:
           gh release create "$tag" \
             --title="$tag" \
             --notes="Release $tag" \
+            --verify-tag \
             main.js manifest.json styles.css

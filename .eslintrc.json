@@ -6,7 +6,9 @@
     "browser": true,
     "es2021": true
   },
-  "plugins": ["@typescript-eslint"],
+  "plugins": [
+    "@typescript-eslint"
+  ],
   "extends": [
     "eslint:recommended",
     "plugin:@typescript-eslint/recommended"
@@ -26,11 +28,55 @@
     "no-unused-vars": "off",
     "@typescript-eslint/no-unused-vars": [
       "warn",
-      { "argsIgnorePattern": "^_" }
+      {
+        "argsIgnorePattern": "^_"
+      }
     ],
     "@typescript-eslint/no-explicit-any": "warn",
     "@typescript-eslint/ban-ts-comment": "off",
     "no-prototype-builtins": "off",
-    "@typescript-eslint/no-empty-function": "off"
+    "@typescript-eslint/no-empty-function": "off",
+    "no-restricted-globals": [
+      "error",
+      {
+        "name": "fetch",
+        "message": "This plugin makes no network requests (see README > Privacy). If that changes, update the README first."
+      },
+      {
+        "name": "XMLHttpRequest",
+        "message": "This plugin makes no network requests (see README > Privacy). If that changes, update the README first."
+      },
+      {
+        "name": "WebSocket",
+        "message": "This plugin makes no network requests (see README > Privacy). If that changes, update the README first."
+      },
+      {
+        "name": "EventSource",
+        "message": "This plugin makes no network requests (see README > Privacy). If that changes, update the README first."
+      }
+    ],
+    "no-restricted-imports": [
+      "error",
+      {
+        "paths": [
+          {
+            "name": "http",
+            "message": "This plugin makes no network requests (see README > Privacy)."
+          },
+          {
+            "name": "https",
+            "message": "This plugin makes no network requests (see README > Privacy)."
+          },
+          {
+            "name": "node:http",
+            "message": "This plugin makes no network requests (see README > Privacy)."
+          },
+          {
+            "name": "node:https",
+            "message": "This plugin makes no network requests (see README > Privacy)."
+          }
+        ]
+      }
+    ]
   }
 }
