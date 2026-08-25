@@ -105,7 +105,7 @@ line-count delta for flat documents.
 | Ignored folders | Templates, Excalidraw, .obsidian | Folders excluded from tracking (matched at any depth) |
 | Ignored files | _(none)_ | File names excluded from tracking |
 | Edit logs path | `Authorship Logs` | Where daily JSONL logs are written |
-| Log retention | `0` (keep all) | Delete logs older than N days |
+| Log retention | `0` (keep all) | Delete logs older than N whole calendar days (`1` keeps today and yesterday) |
 | Auto-import folders | _(none)_ | Folder → source mappings (see below) |
 
 ### Auto-import folder mappings
@@ -187,6 +187,11 @@ Then copy `main.js`, `manifest.json`, and `styles.css` into
 - **`content_origin` is set at creation** — heavily revising an AI-generated note does
   not change its origin. This is intentional: original provenance is what matters for
   citation decisions.
+- **Log pruning runs at load** — retention is applied when the plugin starts, so a
+  vault left open for days will not prune until Obsidian is restarted.
+- **Disabling the plugin cancels pending work** — an edit still inside its debounce
+  window, or an auto-import file still inside its settle delay, is dropped rather than
+  written. A disabled plugin never touches the vault.
 
 ## Development
 

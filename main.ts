@@ -22,6 +22,7 @@ import {
 	invalidPatterns,
 } from "./src/mappings";
 import { shouldIgnoreFile } from "./src/paths";
+import { isLogExpired } from "./src/retention";
 import { formatLocalTimestamp, localDateString } from "./src/time";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -68,14 +69,34 @@ interface LogEntry {
 	summary: string;
 }
 
+// A debounced edit waiting to be stamped. The editor and the view it came from
+// are captured at event time; flushEdit validates the pair before trusting it.
+interface PendingEdit {
+	timer: ReturnType<typeof setTimeout>;
+	editor: Editor;
+	info: MarkdownView | MarkdownFileInfo;
+}
+
+// The file behind an editor-change payload. MarkdownView and MarkdownFileInfo
+// both carry `file`, but neither type guarantees it.
+function infoFile(info: MarkdownView | MarkdownFileInfo): TFile | null {
+	const file = (info as MarkdownView).file ?? (info as MarkdownFileInfo).file;
+	return file instanceof TFile ? file : null;
+}
+
 // ─── Main Plugin ──────────────────────────────────────────────────────────────
 
 export default class AuthorshipTrackerPlugin extends Plugin {
 	settings: AuthorshipTrackerSettings;
 	private _stampInProgress: Set<string> = new Set();
 	private _contentCache: LRUCache<string, string>;
-	private _debounceTimers: Map<string, ReturnType<typeof setTimeout>> =
-		new Map();
+	// Keyed by the TFile itself rather than a path string: Obsidian mutates
+	// TFile.path in place on rename, so holding the object means a pending edit
+	// follows its note instead of pointing at a path that no longer resolves.
+	private _pendingEdits: Map<TFile, PendingEdit> = new Map();
+	// Auto-import settle timers, so a disabled plugin cannot stamp a file after
+	// the fact.
+	private _autoImportTimers: Set<ReturnType<typeof setTimeout>> = new Set();
 	private _lastNoticeTime = 0;
 
 	async onload() {
@@ -90,32 +111,53 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 			this.app.workspace.on(
 				"editor-change",
 				(editor: Editor, info: MarkdownView | MarkdownFileInfo) => {
-					const file =
-						(info as MarkdownView).file ??
-						(info as MarkdownFileInfo).file;
-					if (!file || !(file instanceof TFile)) return;
+					const file = infoFile(info);
+					if (!file) return;
 					if (this.shouldIgnore(file)) return;
 					if (this._stampInProgress.has(file.path)) return;
 
-					// Reset debounce timer
-					const existing = this._debounceTimers.get(file.path);
-					if (existing) clearTimeout(existing);
+					// Reset the debounce window for this note.
+					const existing = this._pendingEdits.get(file);
+					if (existing) clearTimeout(existing.timer);
 
-					// Capture file path for stale-reference safety check
-					const filePath = file.path;
+					// Capture the editor that emitted the event, together with the
+					// view it came from. The view is what lets us check at fire time
+					// that the editor still holds THIS note (see flushEdit).
 					const timer = setTimeout(() => {
-						this._debounceTimers.delete(filePath);
-						// Verify the editor is still showing the same file
-						const activeView =
-							this.app.workspace.getActiveViewOfType(MarkdownView);
-						if (activeView?.file?.path === filePath) {
-							this.handleEdit(activeView.editor, activeView.file);
-						}
+						this._pendingEdits.delete(file);
+						void this.flushEdit(file, editor, info);
 					}, this.settings.debounceMs);
 
-					this._debounceTimers.set(file.path, timer);
+					this._pendingEdits.set(file, { timer, editor, info });
 				},
 			),
+		);
+
+		// A pending edit for a deleted note has nothing left to stamp.
+		this.registerEvent(
+			this.app.vault.on("delete", (file) => {
+				if (!(file instanceof TFile)) return;
+				const pending = this._pendingEdits.get(file);
+				if (pending) {
+					clearTimeout(pending.timer);
+					this._pendingEdits.delete(file);
+				}
+				this._contentCache.delete(file.path);
+			}),
+		);
+
+		// A rename needs no re-keying — the map is keyed by the TFile object and
+		// Obsidian mutates its path in place — but the diff baseline is cached by
+		// path and would otherwise be orphaned.
+		this.registerEvent(
+			this.app.vault.on("rename", (file, oldPath) => {
+				if (!(file instanceof TFile)) return;
+				const cached = this._contentCache.get(oldPath);
+				if (cached !== undefined) {
+					this._contentCache.delete(oldPath);
+					this._contentCache.set(file.path, cached);
+				}
+			}),
 		);
 
 		// Cache content when the user opens/focuses a note (for diff computation).
@@ -157,13 +199,15 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 					if (!result) return;
 
 					const createPath = file.path;
-					setTimeout(() => {
+					const timer = setTimeout(() => {
+						this._autoImportTimers.delete(timer);
 						const currentFile =
 							this.app.vault.getAbstractFileByPath(createPath);
 						if (currentFile instanceof TFile) {
-							this.handleCreate(currentFile);
+							void this.handleCreate(currentFile);
 						}
 					}, AUTO_IMPORT_STAMP_DELAY_MS);
+					this._autoImportTimers.add(timer);
 				}),
 			);
 
@@ -178,7 +222,7 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 			editorCallback: (editor: Editor, ctx) => {
 				const file = ctx.file;
 				if (file instanceof TFile) {
-					this.handleEdit(editor, file);
+					void this.handleEdit(file, editor.getValue());
 				}
 			},
 		});
@@ -204,10 +248,20 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 	}
 
 	onunload() {
-		for (const timer of this._debounceTimers.values()) {
+		// A disabled plugin must not touch the vault. Both kinds of pending work
+		// are cancelled rather than flushed: onunload is synchronous and
+		// un-awaited, so anything started here would land after teardown, and a
+		// write arriving from a plugin the user has just switched off is worse
+		// than losing an edit that was still inside its debounce window.
+		for (const pending of this._pendingEdits.values()) {
+			clearTimeout(pending.timer);
+		}
+		this._pendingEdits.clear();
+
+		for (const timer of this._autoImportTimers) {
 			clearTimeout(timer);
 		}
-		this._debounceTimers.clear();
+		this._autoImportTimers.clear();
 	}
 
 	private authorName(): string {
@@ -223,13 +277,65 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 		);
 	}
 
-	private async handleEdit(editor: Editor, file: TFile) {
-		if (this._stampInProgress.has(file.path)) return;
-		this._stampInProgress.add(file.path);
+	// Resolve the content for a debounced edit and stamp it.
+	//
+	// The captured editor is validated, never trusted: an Obsidian leaf can be
+	// re-pointed at a different note (clicking a link in the same tab), and the
+	// Editor object survives that. Reading it blindly would stamp THIS note's
+	// frontmatter using the OTHER note's text, and poison the diff baseline with
+	// it. So we only call getValue() when the view still holds this file.
+	//
+	// Note what is NOT here: no scan of the workspace for a leaf showing the file.
+	// The emitting editor is already in hand, and a scan would miss canvas and
+	// popover editors, and deferred leaves, which never appear as markdown leaves.
+	private async flushEdit(
+		file: TFile,
+		editor: Editor,
+		info: MarkdownView | MarkdownFileInfo,
+	): Promise<void> {
+		// The note may have been deleted, or the settings changed, during the
+		// debounce window.
+		if (!(this.app.vault.getAbstractFileByPath(file.path) instanceof TFile)) {
+			return;
+		}
+		if (this.shouldIgnore(file)) return;
 
-		const author = this.authorName();
-		const currentContent = editor.getValue();
+		let content: string | null = null;
+		if (infoFile(info) === file) {
+			try {
+				content = editor.getValue();
+			} catch {
+				content = null;
+			}
+		}
+
+		if (content === null) {
+			try {
+				// vault.read, not cachedRead: the cached copy can predate the edit
+				// we are trying to record.
+				content = await this.app.vault.read(file);
+			} catch (err) {
+				this.notifyError("Failed to read edited note", err);
+				return;
+			}
+		}
+
+		await this.handleEdit(file, content);
+	}
+
+	private async handleEdit(file: TFile, currentContent: string) {
+		if (this._stampInProgress.has(file.path)) return;
+
 		const cachedContent = this._contentCache.get(file.path) ?? "";
+
+		// A no-op editor-change — an undo back to the original, or the plugin's
+		// own frontmatter write echoing back — should not inflate edit_count or
+		// add a log line. Checked before the reentrancy guard is taken so there is
+		// no guard to release.
+		if (cachedContent === currentContent) return;
+
+		this._stampInProgress.add(file.path);
+		const author = this.authorName();
 
 		const summary = cachedContent
 			? generateDiffSummary(cachedContent, currentContent)
@@ -364,7 +470,7 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 		}
 	}
 
-	private async pruneLogs(): Promise<void> {
+	private async pruneLogs(now: Date = new Date()): Promise<void> {
 		const days = this.settings.logRetentionDays;
 		if (!days || days <= 0) return;
 
@@ -372,17 +478,16 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 		const folder = this.app.vault.getAbstractFileByPath(dir);
 		if (!(folder instanceof TFolder)) return;
 
-		const cutoff = Date.now() - days * 86400000;
-		for (const child of folder.children) {
+		// Iterate a snapshot: vault.delete() splices folder.children, and walking
+		// the live array while deleting from it skips every other match — with four
+		// expired logs, two of them survived every prune.
+		for (const child of folder.children.slice()) {
 			if (!(child instanceof TFile)) continue;
-			if (!/^\d{4}-\d{2}-\d{2}\.jsonl$/.test(child.name)) continue;
-			const t = Date.parse(child.name.slice(0, 10) + "T00:00:00");
-			if (!isNaN(t) && t < cutoff) {
-				try {
-					await this.app.vault.delete(child);
-				} catch (err) {
-					this.notifyError("Failed to prune old log", err);
-				}
+			if (!isLogExpired(child.name, now, days)) continue;
+			try {
+				await this.app.vault.delete(child);
+			} catch (err) {
+				this.notifyError("Failed to prune old log", err);
 			}
 		}
 	}
@@ -534,7 +639,7 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Log retention")
 			.setDesc(
-				"Delete daily logs older than this many days. Set to 0 to keep all logs.",
+				"Delete daily logs older than this many days, counted in whole calendar days. Today's log is always kept, and 1 also keeps yesterday's. Set to 0 to keep all logs.",
 			)
 			.addText((text) =>
 				text
