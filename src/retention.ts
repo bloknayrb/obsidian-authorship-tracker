@@ -1,5 +1,5 @@
 // Daily-log retention, measured in whole *local calendar days* to match how the
-// log file names are produced (see localDateString in ./time).
+// log file names are produced (localDateString in ./time).
 //
 // The previous implementation compared `Date.now() - days * 86_400_000` against a
 // local-midnight parse of the file name. That is a rolling 24-hour window, not a
@@ -11,12 +11,11 @@
 // yesterday's, and deletes the day before. Retention 0 disables pruning entirely.
 //
 // Pure logic — no Obsidian dependency, so it is unit testable in isolation.
-import { localDateString } from "./time";
 
-// Daily logs are named "YYYY-MM-DD.jsonl". The month/day ranges are constrained
-// so that a nonsense name like "0000-00-00.jsonl" is never a deletion candidate.
-export const LOG_FILE_RE =
-	/^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\.jsonl$/;
+// Daily logs are named "YYYY-MM-DD.jsonl". Shape only — the round-trip check in
+// parseLogFileName is what rejects nonsense like "0000-00-00" or "2026-02-30",
+// so the ranges are not also encoded here.
+const LOG_FILE_RE = /^(\d{4})-(\d{2})-(\d{2})\.jsonl$/;
 
 interface CalendarDate {
 	year: number;
@@ -50,15 +49,19 @@ export function parseLogFileName(fileName: string): CalendarDate | null {
 // Both operands of the subtraction in logAgeInDays go through this, so a 23- or
 // 25-hour local day at a DST boundary cannot shift the difference. Using UTC here
 // is not a timezone choice — it is just a stable grid to count days on. Which
-// calendar day "today" is remains a local-time question, answered by
-// localDateString below.
+// calendar day "today" is remains a local-time question, answered by today().
 function toDayNumber({ year, month, day }: CalendarDate): number {
 	return Math.round(Date.UTC(year, month - 1, day) / 86_400_000);
 }
 
 function today(now: Date): CalendarDate {
-	const [year, month, day] = localDateString(now).split("-").map(Number);
-	return { year, month, day };
+	// Local components directly: localDateString would zero-pad these same three
+	// values only for us to split and Number() them back.
+	return {
+		year: now.getFullYear(),
+		month: now.getMonth() + 1,
+		day: now.getDate(),
+	};
 }
 
 // Whole local calendar days between a log's date and `now`. Positive means past;
@@ -84,17 +87,4 @@ export function isLogExpired(
 	const age = logAgeInDays(fileName, now);
 	if (age === null) return false;
 	return age > retentionDays;
-}
-
-// The oldest date still retained, as "YYYY-MM-DD", or null when retention is
-// disabled. Exported for settings copy and for tests to pin the boundary.
-export function retentionCutoffDate(
-	now: Date,
-	retentionDays: number,
-): string | null {
-	if (!Number.isFinite(retentionDays) || retentionDays <= 0) return null;
-	const { year, month, day } = today(now);
-	// Day arithmetic in the local calendar: the Date constructor normalises an
-	// out-of-range day across month and year boundaries.
-	return localDateString(new Date(year, month - 1, day - retentionDays));
 }

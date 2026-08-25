@@ -69,18 +69,10 @@ interface LogEntry {
 	summary: string;
 }
 
-// A debounced edit waiting to be stamped. The editor and the view it came from
-// are captured at event time; flushEdit validates the pair before trusting it.
-interface PendingEdit {
-	timer: ReturnType<typeof setTimeout>;
-	editor: Editor;
-	info: MarkdownView | MarkdownFileInfo;
-}
-
 // The file behind an editor-change payload. MarkdownView and MarkdownFileInfo
 // both carry `file`, but neither type guarantees it.
 function infoFile(info: MarkdownView | MarkdownFileInfo): TFile | null {
-	const file = (info as MarkdownView).file ?? (info as MarkdownFileInfo).file;
+	const file = (info as { file?: TFile | null }).file;
 	return file instanceof TFile ? file : null;
 }
 
@@ -93,11 +85,18 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 	// Keyed by the TFile itself rather than a path string: Obsidian mutates
 	// TFile.path in place on rename, so holding the object means a pending edit
 	// follows its note instead of pointing at a path that no longer resolves.
-	private _pendingEdits: Map<TFile, PendingEdit> = new Map();
+	//
+	// Note the deliberate duality: _contentCache and _stampInProgress stay keyed
+	// by path, because they are about a location's content rather than a note's
+	// identity. The rename handler re-keys the cache; _stampInProgress needs no
+	// handler because an entry lives only for the duration of one stamp.
+	private _pendingEdits: Map<TFile, ReturnType<typeof setTimeout>> = new Map();
 	// Auto-import settle timers, so a disabled plugin cannot stamp a file after
 	// the fact.
 	private _autoImportTimers: Set<ReturnType<typeof setTimeout>> = new Set();
 	private _lastNoticeTime = 0;
+	// Set in onunload so the in-flight prune loop stops deleting.
+	private _unloaded = false;
 
 	async onload() {
 		await this.loadSettings();
@@ -118,7 +117,7 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 
 					// Reset the debounce window for this note.
 					const existing = this._pendingEdits.get(file);
-					if (existing) clearTimeout(existing.timer);
+					if (existing) clearTimeout(existing);
 
 					// Capture the editor that emitted the event, together with the
 					// view it came from. The view is what lets us check at fire time
@@ -128,7 +127,7 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 						void this.flushEdit(file, editor, info);
 					}, this.settings.debounceMs);
 
-					this._pendingEdits.set(file, { timer, editor, info });
+					this._pendingEdits.set(file, timer);
 				},
 			),
 		);
@@ -137,9 +136,12 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on("delete", (file) => {
 				if (!(file instanceof TFile)) return;
+				// Cancelling here is an optimisation, not a correctness requirement:
+				// flushEdit re-checks that the file still exists. Dropping the
+				// cached baseline, though, is required.
 				const pending = this._pendingEdits.get(file);
 				if (pending) {
-					clearTimeout(pending.timer);
+					clearTimeout(pending);
 					this._pendingEdits.delete(file);
 				}
 				this._contentCache.delete(file.path);
@@ -248,13 +250,15 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 	}
 
 	onunload() {
+		this._unloaded = true;
+
 		// A disabled plugin must not touch the vault. Both kinds of pending work
 		// are cancelled rather than flushed: onunload is synchronous and
 		// un-awaited, so anything started here would land after teardown, and a
 		// write arriving from a plugin the user has just switched off is worse
 		// than losing an edit that was still inside its debounce window.
-		for (const pending of this._pendingEdits.values()) {
-			clearTimeout(pending.timer);
+		for (const timer of this._pendingEdits.values()) {
+			clearTimeout(timer);
 		}
 		this._pendingEdits.clear();
 
@@ -295,9 +299,9 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 	): Promise<void> {
 		// The note may have been deleted, or the settings changed, during the
 		// debounce window.
-		if (!(this.app.vault.getAbstractFileByPath(file.path) instanceof TFile)) {
-			return;
-		}
+		// Identity, not just "a TFile lives at this path" — another note moved into
+		// the path would satisfy the weaker check.
+		if (this.app.vault.getAbstractFileByPath(file.path) !== file) return;
 		if (this.shouldIgnore(file)) return;
 
 		let content: string | null = null;
@@ -320,21 +324,21 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 			}
 		}
 
+		// A no-op editor-change — an undo back to the original, or the plugin's own
+		// frontmatter write echoing back — should not inflate edit_count or add a
+		// log line. This lives here rather than in handleEdit deliberately: the
+		// stamp-current-note command also calls handleEdit, and an explicit user
+		// action must always stamp, even when the content is unchanged.
+		if (content === (this._contentCache.get(file.path) ?? "")) return;
+
 		await this.handleEdit(file, content);
 	}
 
 	private async handleEdit(file: TFile, currentContent: string) {
 		if (this._stampInProgress.has(file.path)) return;
+		this._stampInProgress.add(file.path);
 
 		const cachedContent = this._contentCache.get(file.path) ?? "";
-
-		// A no-op editor-change — an undo back to the original, or the plugin's
-		// own frontmatter write echoing back — should not inflate edit_count or
-		// add a log line. Checked before the reentrancy guard is taken so there is
-		// no guard to release.
-		if (cachedContent === currentContent) return;
-
-		this._stampInProgress.add(file.path);
 		const author = this.authorName();
 
 		const summary = cachedContent
@@ -482,6 +486,9 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 		// the live array while deleting from it skips every other match — with four
 		// expired logs, two of them survived every prune.
 		for (const child of folder.children.slice()) {
+			// pruneLogs is launched un-awaited from onLayoutReady, so it can still
+			// be deleting when the user disables the plugin.
+			if (this._unloaded) return;
 			if (!(child instanceof TFile)) continue;
 			if (!isLogExpired(child.name, now, days)) continue;
 			try {

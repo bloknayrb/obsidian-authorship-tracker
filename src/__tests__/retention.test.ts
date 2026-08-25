@@ -1,10 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-	isLogExpired,
-	logAgeInDays,
-	parseLogFileName,
-	retentionCutoffDate,
-} from "../retention";
+import { isLogExpired, logAgeInDays, parseLogFileName } from "../retention";
 
 // All dates are built with `new Date(y, m, d, ...)` so the suite is
 // timezone-independent, matching the convention in time.test.ts.
@@ -124,27 +119,15 @@ describe("isLogExpired", () => {
 	it("never expires a future-dated log", () => {
 		expect(isLogExpired("2026-08-26.jsonl", now, 1)).toBe(false);
 	});
-});
 
-describe("retentionCutoffDate", () => {
-	it("is the oldest date still kept", () => {
-		const now = noon(2026, 8, 25);
-		expect(retentionCutoffDate(now, 1)).toBe("2026-08-24");
-		expect(retentionCutoffDate(now, 7)).toBe("2026-08-18");
-
-		// The cutoff date itself is kept; the day before it is not.
-		const cutoff = retentionCutoffDate(now, 7)!;
-		expect(isLogExpired(`${cutoff}.jsonl`, now, 7)).toBe(false);
-	});
-
-	it("underflows across month and year boundaries", () => {
-		expect(retentionCutoffDate(noon(2026, 3, 1), 3)).toBe("2026-02-26");
-		expect(retentionCutoffDate(noon(2026, 1, 2), 7)).toBe("2025-12-26");
-		expect(retentionCutoffDate(noon(2024, 3, 1), 2)).toBe("2024-02-28");
-	});
-
-	it("is null when retention is disabled", () => {
-		expect(retentionCutoffDate(noon(2026, 8, 25), 0)).toBeNull();
-		expect(retentionCutoffDate(noon(2026, 8, 25), -1)).toBeNull();
+	it("holds the boundary across month and year underflow", () => {
+		// What retentionCutoffDate used to assert, expressed through the function
+		// that production code actually calls.
+		expect(isLogExpired("2026-02-26.jsonl", noon(2026, 3, 1), 3)).toBe(false);
+		expect(isLogExpired("2026-02-25.jsonl", noon(2026, 3, 1), 3)).toBe(true);
+		expect(isLogExpired("2025-12-26.jsonl", noon(2026, 1, 2), 7)).toBe(false);
+		expect(isLogExpired("2025-12-25.jsonl", noon(2026, 1, 2), 7)).toBe(true);
+		expect(isLogExpired("2024-02-28.jsonl", noon(2024, 3, 1), 2)).toBe(false);
+		expect(isLogExpired("2024-02-27.jsonl", noon(2024, 3, 1), 2)).toBe(true);
 	});
 });

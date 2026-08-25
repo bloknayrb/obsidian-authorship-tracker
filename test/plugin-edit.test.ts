@@ -10,10 +10,12 @@ import {
 	DEBOUNCE,
 	boot,
 	fireEdit,
+	fireEditIn,
 	folderContents,
 	installFakeClock,
 	readFrontMatter,
 	readLog,
+	seedLogs,
 } from "./helpers";
 
 describe("#3 — attribute a debounced edit to the note that emitted it", () => {
@@ -57,8 +59,7 @@ describe("#3 — attribute a debounced edit to the note that emitted it", () => 
 		// B becomes the active pane; A stays open beside it.
 		app.workspace.__openLeaf(b, "# B\n");
 
-		viewA.editor.setValue("# A\n\nhello world\n");
-		app.workspace.trigger("editor-change", viewA.editor, viewA);
+		fireEditIn(app, viewA, "# A\n\nhello world\n");
 		await vi.advanceTimersByTimeAsync(DEBOUNCE);
 
 		expect(readFrontMatter(app, "Notes/a.md").last_modified_by).toBe("tester");
@@ -76,8 +77,7 @@ describe("#3 — attribute a debounced edit to the note that emitted it", () => 
 
 		const edited = "# A\n\n## Alpha\n\nalpha body\n\n## Added\n\nnew\n";
 		const view = app.workspace.__openLeaf(a, "# A\n\n## Alpha\n\nalpha body\n");
-		view.editor.setValue(edited);
-		app.workspace.trigger("editor-change", view.editor, view);
+		fireEditIn(app, view, edited);
 
 		// Obsidian flushes the buffer to disk on its own schedule; do that here so
 		// the fallback path has the edited text rather than a stale copy.
@@ -126,11 +126,9 @@ describe("#3 — attribute a debounced edit to the note that emitted it", () => 
 
 		await app.vault.rename(a, "Notes/renamed.md");
 
-		// Reuse the same view rather than reopening: a reopen would re-seed the
-		// baseline from the vault under the new path and pass whether or not the
-		// rename handler re-keyed the cache.
-		view.editor.setValue("# A\n\n## One\n\nbody\n\n## Two\n\nmore\n");
-		app.workspace.trigger("editor-change", view.editor, view);
+		// Reuse the same view rather than reopening, so the assertion depends on
+		// the rename handler re-keying the cache.
+		fireEditIn(app, view, "# A\n\n## One\n\nbody\n\n## Two\n\nmore\n");
 		await vi.advanceTimersByTimeAsync(DEBOUNCE);
 
 		const [entry] = readLog(app);
@@ -161,8 +159,7 @@ describe("#3 — attribute a debounced edit to the note that emitted it", () => 
 		// does not, so the two sides would never compare equal.
 		const view = app.workspace.__openLeaf(a, "# A\n\nhello\n");
 		const fire = async (value: string) => {
-			view.editor.setValue(value);
-			app.workspace.trigger("editor-change", view.editor, view);
+			fireEditIn(app, view, value);
 			await vi.advanceTimersByTimeAsync(DEBOUNCE);
 		};
 
@@ -176,6 +173,26 @@ describe("#3 — attribute a debounced edit to the note that emitted it", () => 
 
 		// Positive control: a real change still counts.
 		await fire("# A\n\nhello world again\n");
+		expect(readFrontMatter(app, "Notes/a.md").edit_count).toBe(2);
+		expect(readLog(app)).toHaveLength(2);
+	});
+
+	it("stamp-current-note always stamps, even on unchanged content", async () => {
+		// The no-op guard suppresses echo/undo on the DEBOUNCE path only. An
+		// explicit user command must still stamp: the common moment to reach for
+		// it is right after an auto-stamp, when content matches the cache exactly.
+		const a = app.vault.__seed("Notes/a.md", "# A\n");
+		plugin = await boot(app);
+		const view = app.workspace.__openLeaf(a, "# A\n");
+
+		fireEditIn(app, view, "# A\n\nedited\n");
+		await vi.advanceTimersByTimeAsync(DEBOUNCE);
+		expect(readFrontMatter(app, "Notes/a.md").edit_count).toBe(1);
+
+		const cmd = app.__commands.find((c) => c.id === "stamp-current-note")!;
+		await cmd.editorCallback!(view.editor, { file: a });
+		await vi.advanceTimersByTimeAsync(0);
+
 		expect(readFrontMatter(app, "Notes/a.md").edit_count).toBe(2);
 		expect(readLog(app)).toHaveLength(2);
 	});
@@ -208,13 +225,6 @@ describe("#4 — calendar-day log retention", () => {
 	let app: App;
 	let plugin: AuthorshipTrackerPlugin | undefined;
 
-	// The suite clock is pinned to 2026-08-25 12:00 local.
-	const seedLogs = (...dates: string[]) => {
-		for (const d of dates) {
-			app.vault.__seed(`Authorship Logs/${d}.jsonl`, "{}\n");
-		}
-	};
-
 	beforeEach(() => {
 		installFakeClock();
 		app = new App();
@@ -227,7 +237,7 @@ describe("#4 — calendar-day log retention", () => {
 	});
 
 	it("keeps yesterday's log at retention 1", async () => {
-		seedLogs("2026-08-25", "2026-08-24", "2026-08-23", "2026-08-22");
+		seedLogs(app, ["2026-08-25", "2026-08-24", "2026-08-23", "2026-08-22"]);
 		plugin = await boot(app, { logRetentionDays: 1 });
 		await vi.advanceTimersByTimeAsync(0);
 
@@ -241,13 +251,7 @@ describe("#4 — calendar-day log retention", () => {
 		// The mutation-during-iteration regression: pruneLogs walked
 		// folder.children while vault.delete spliced that same array, so with four
 		// consecutive expired logs, 2020-01-02 and 2020-01-04 survived.
-		seedLogs(
-			"2020-01-01",
-			"2020-01-02",
-			"2020-01-03",
-			"2020-01-04",
-			"2026-08-25",
-		);
+		seedLogs(app, ["2020-01-01", "2020-01-02", "2020-01-03", "2020-01-04", "2026-08-25"]);
 		plugin = await boot(app, { logRetentionDays: 7 });
 		await vi.advanceTimersByTimeAsync(0);
 
@@ -255,7 +259,7 @@ describe("#4 — calendar-day log retention", () => {
 	});
 
 	it("keeps everything at retention 0", async () => {
-		seedLogs("2020-01-01", "2020-01-02", "2026-08-25");
+		seedLogs(app, ["2020-01-01", "2020-01-02", "2026-08-25"]);
 		plugin = await boot(app, { logRetentionDays: 0 });
 		await vi.advanceTimersByTimeAsync(0);
 
@@ -267,7 +271,7 @@ describe("#4 — calendar-day log retention", () => {
 	});
 
 	it("never deletes files that are not daily logs", async () => {
-		seedLogs("2020-01-01");
+		seedLogs(app, ["2020-01-01"]);
 		app.vault.__seed("Authorship Logs/notes.md", "keep me\n");
 		app.vault.__seed("Authorship Logs/0000-00-00.jsonl", "junk\n");
 		app.vault.__seed("Authorship Logs/2020-01-01.jsonl.bak", "backup\n");
@@ -283,12 +287,52 @@ describe("#4 — calendar-day log retention", () => {
 	});
 
 	it("prunes on the boundary exactly", async () => {
-		seedLogs("2026-08-18", "2026-08-17");
+		seedLogs(app, ["2026-08-18", "2026-08-17"]);
 		plugin = await boot(app, { logRetentionDays: 7 });
 		await vi.advanceTimersByTimeAsync(0);
 
 		// Age 7 is kept, age 8 is not.
 		expect(folderContents(app, "Authorship Logs")).toEqual(["2026-08-18.jsonl"]);
+	});
+
+	it("stops pruning when the plugin is unloaded mid-sweep", async () => {
+		// pruneLogs is launched un-awaited from onLayoutReady, so without a check
+		// it kept deleting after the user disabled the plugin — contradicting the
+		// guarantee that a disabled plugin never touches the vault.
+		seedLogs(app, [
+			"2020-01-01",
+			"2020-01-02",
+			"2020-01-03",
+			"2020-01-04",
+			"2020-01-05",
+			"2020-01-06",
+		]);
+		plugin = await boot(app, { logRetentionDays: 1 });
+		// The sweep is already in flight by the time boot() returns — onLayoutReady
+		// starts it — so the guarantee is that it STOPS, not that nothing was
+		// deleted. Without the check, all six go.
+		plugin.onunload();
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(folderContents(app, "Authorship Logs").length).toBeGreaterThan(0);
+	});
+
+	it("prunes the whole sweep when it is not interrupted", async () => {
+		// Positive control for the test above: the same fixture, left to run,
+		// deletes everything expired. Without it, "some logs survived" would also
+		// pass on a prune that never ran.
+		seedLogs(app, [
+			"2020-01-01",
+			"2020-01-02",
+			"2020-01-03",
+			"2020-01-04",
+			"2020-01-05",
+			"2020-01-06",
+		]);
+		plugin = await boot(app, { logRetentionDays: 1 });
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(folderContents(app, "Authorship Logs")).toEqual([]);
 	});
 
 	it("leaves a missing log folder alone", async () => {
