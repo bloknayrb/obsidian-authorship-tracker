@@ -1,0 +1,17 @@
+{
+  // Typechecks the tests and the mock, resolving "obsidian" to the in-memory fake.
+  // This is deliberately NOT a substitute for tsconfig.json: that one checks main.ts
+  // against the real obsidian .d.ts and is the only thing that catches mock drift.
+  // Both run in CI; neither subsumes the other.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["vitest/globals", "node"],
+    "paths": { "obsidian": ["./test/obsidian-mock.ts"] }
+  },
+  "include": ["main.ts", "src/**/*.ts", "test/**/*.ts"],
+  // `extends` REPLACES rather than merges `exclude`. Omitting it here would inherit
+  // the base config's exclusion of src/**/*.test.ts and this step would silently
+  // check nothing.
+  "exclude": ["node_modules"]
+}

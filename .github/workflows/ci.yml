@@ -15,18 +15,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Typecheck
-        run: npx tsc -noEmit -skipLibCheck -p tsconfig.json
-
-      - name: Test
-        run: npm test
+      # Lint, typecheck (against the real Obsidian API), typecheck the tests
+      # (against the mock), and run the suite. Defined in package.json so CI, the
+      # release workflow, and contributors all run exactly the same checks.
+      - name: Verify
+        run: npm run verify
 
       - name: Build
         run: node esbuild.config.mjs production
