@@ -128,6 +128,29 @@ The optional third field is a regular expression matched against the file name, 
 single folder can route different file types to different sources. Files that match no
 mapping are left untouched.
 
+Only the first two `|` separate fields, so a pattern may contain alternations of its
+own — `Meetings=importer:notes|ai-derived|(Notes|Summary)-.*\.md$` works as written.
+
+#### Pattern limits
+
+The match runs on the UI thread while Obsidian is handling a vault event, so a regex
+that backtracks catastrophically can freeze the app. `(a+)+$` against a thirty-character
+filename takes about twelve seconds — this is not bounded by how short filenames are.
+
+Patterns are therefore checked before use: anything over 200 characters is refused, and
+each pattern is run against short adversarial inputs and timed. One that is measurably
+slow on a 24-character probe is rejected, because that is what a hang on a real filename
+looks like early. A rejected pattern is reported in settings and again on load, and its
+mapping simply never matches — it is **not** downgraded to matching every file in the
+folder.
+
+This is a practical check, not a guarantee. It has no false positives on ordinary
+patterns and catches the known catastrophic shapes, but it cannot promise to catch every
+possible one; a pattern that slips through and proves slow in use is disabled for the
+rest of the session the first time it is measured. Keep patterns simple — anchored
+prefixes like `^Transcript-` are the intended use, and nested quantified groups such as
+`(\w+)+` are worth avoiding regardless.
+
 ## Querying the data
 
 Because everything is plain frontmatter, you can query it with
@@ -187,6 +210,9 @@ Then copy `main.js`, `manifest.json`, and `styles.css` into
 - **`content_origin` is set at creation** — heavily revising an AI-generated note does
   not change its origin. This is intentional: original provenance is what matters for
   citation decisions.
+- **Filename patterns are screened, not sandboxed** — see [Pattern limits](#pattern-limits).
+  A pattern that survives screening and later proves slow is disabled after its first
+  slow match, not before it.
 - **Log pruning runs at load** — retention is applied when the plugin starts, so a
   vault left open for days will not prune until Obsidian is restarted.
 - **Disabling the plugin cancels pending work** — an edit still inside its debounce

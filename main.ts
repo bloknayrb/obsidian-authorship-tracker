@@ -19,8 +19,9 @@ import {
 	getAutoImportResult,
 	parseMappings,
 	serializeMappings,
-	invalidPatterns,
+	patternProblems,
 } from "./src/mappings";
+import { describeProblem, setPoisonListener } from "./src/patterns";
 import { shouldIgnoreFile } from "./src/paths";
 import { isLogExpired } from "./src/retention";
 import { formatLocalTimestamp, localDateString } from "./src/time";
@@ -34,6 +35,10 @@ export const AUTO_IMPORT_STAMP_DELAY_MS = 3000;
 const FALLBACK_AUTHOR = "me";
 // Minimum interval between user-facing error notices, to avoid spamming.
 const NOTICE_THROTTLE_MS = 60000;
+// How long to wait after the last keystroke in the mappings textarea before
+// validating and saving. Validation probes each pattern for catastrophic
+// backtracking, which is far too costly to run per keystroke.
+const MAPPINGS_VALIDATE_DELAY_MS = 600;
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
@@ -95,11 +100,22 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 	// the fact.
 	private _autoImportTimers: Set<ReturnType<typeof setTimeout>> = new Set();
 	private _lastNoticeTime = 0;
-	// Set in onunload so the in-flight prune loop stops deleting.
+	// Set in onunload so in-flight work stops before it writes.
 	private _unloaded = false;
 
 	async onload() {
 		await this.loadSettings();
+		this.warnAboutUnusablePatterns();
+
+		// A pattern can also be disabled mid-session, if it passes validation and
+		// then proves slow on a real filename. That silently stops attributing
+		// imports, so say it out loud.
+		setPoisonListener((pattern) => {
+			this.notifyError(
+				`Disabled filename pattern "${pattern}" — it was too slow on a real filename`,
+				new Error("pattern disabled at match time"),
+			);
+		});
 		this._contentCache = new LRUCache<string, string>(
 			this.settings.maxCacheSize,
 		);
@@ -269,6 +285,31 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 			clearTimeout(timer);
 		}
 		this._autoImportTimers.clear();
+	}
+
+	// A stored filename pattern never passes back through the settings tab, so a
+	// pattern that cannot be used would otherwise fail silently — auto-imported
+	// notes would just stop being attributed, with no indication why. In a
+	// provenance plugin that is the worst possible failure mode, so say it out
+	// loud once at load.
+	private warnAboutUnusablePatterns(): void {
+		const issues = patternProblems(this.settings.autoImportFolders);
+		if (issues.length === 0) return;
+
+		const detail = issues
+			.map((i) => `"${i.pattern}" (${describeProblem(i.problem)})`)
+			.join("; ");
+		console.error(
+			`[authorship-tracker] Ignoring unusable filename pattern(s): ${detail}`,
+		);
+		new Notice(
+			`Authorship Tracker: ignoring unusable filename pattern(s): ${detail}. Auto-import for those folders is disabled until they are fixed.`,
+		);
+	}
+
+	// Exposed so the settings tab's debounced save can check it too.
+	get isDisabled(): boolean {
+		return this._unloaded;
 	}
 
 	private authorName(): string {
@@ -543,10 +584,58 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 
 class AuthorshipTrackerSettingTab extends PluginSettingTab {
 	plugin: AuthorshipTrackerPlugin;
+	private _mappingsDebounce: ReturnType<typeof setTimeout> | null = null;
+	private _pendingMappings: string | null = null;
 
 	constructor(app: App, plugin: AuthorshipTrackerPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
+	}
+
+	// Closing the settings tab must not discard an edit still inside the debounce
+	// window — that would be a regression from the previous save-per-keystroke
+	// behavior, and the user has no way to know it happened.
+	hide(): void {
+		this.flushMappings();
+	}
+
+	private flushMappings(): void {
+		if (this._mappingsDebounce) {
+			clearTimeout(this._mappingsDebounce);
+			this._mappingsDebounce = null;
+		}
+		const pending = this._pendingMappings;
+		this._pendingMappings = null;
+		if (pending !== null) void this.commitMappings(pending);
+	}
+
+	// Save what the user typed, and report any pattern that cannot be used.
+	//
+	// Two deliberate choices here. First, the whole textarea is saved rather than
+	// rejected: previously a single bad pattern discarded every other mapping the
+	// user had just typed. Second, an unusable pattern is kept verbatim rather
+	// than stripped — getAutoImportResult treats it as a non-match, so the
+	// mapping simply never fires. Stripping it would leave a bare
+	// `Folder=Author|Origin` rule that matches EVERY file in that folder, turning
+	// a bad pattern into mass mis-attribution.
+	private async commitMappings(value: string): Promise<void> {
+		// The debounce can outlive the plugin being disabled.
+		if (this.plugin.isDisabled) return;
+
+		const mappings = parseMappings(value);
+		const issues = patternProblems(mappings);
+
+		if (issues.length > 0) {
+			const detail = issues
+				.map((i) => `"${i.pattern}" (${describeProblem(i.problem)})`)
+				.join("; ");
+			new Notice(
+				`Authorship Tracker: unusable filename pattern(s): ${detail}. Those mappings will not match anything until fixed.`,
+			);
+		}
+
+		this.plugin.settings.autoImportFolders = mappings;
+		await this.plugin.saveSettings();
 	}
 
 	display(): void {
@@ -704,19 +793,21 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 							this.plugin.settings.autoImportFolders,
 						),
 					)
-					.onChange(async (value) => {
-						const mappings = parseMappings(value);
-						const bad = invalidPatterns(mappings);
-						if (bad.length > 0) {
-							new Notice(
-								`Authorship Tracker: invalid filename pattern(s): ${bad.join(
-									", ",
-								)}`,
-							);
-							return;
+					.onChange((value) => {
+						// Validation runs the pattern against adversarial probe
+						// inputs, which costs real time on a pathological one, so it
+						// must not run on every keystroke — and a half-typed pattern
+						// like "^(" is not an error worth shouting about yet.
+						if (this._mappingsDebounce) {
+							clearTimeout(this._mappingsDebounce);
 						}
-						this.plugin.settings.autoImportFolders = mappings;
-						await this.plugin.saveSettings();
+						this._pendingMappings = value;
+						this._mappingsDebounce = setTimeout(() => {
+							this._mappingsDebounce = null;
+							const pending = this._pendingMappings;
+							this._pendingMappings = null;
+							if (pending !== null) void this.commitMappings(pending);
+						}, MAPPINGS_VALIDATE_DELAY_MS);
 					});
 			});
 	}

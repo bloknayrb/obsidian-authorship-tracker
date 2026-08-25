@@ -533,6 +533,7 @@ export class Plugin {
 // element surface the settings tab touches is stubbed by hand.
 export class FakeEl {
 	children: FakeEl[] = [];
+	__settings: Setting[] = [];
 	tag: string;
 	cls: string;
 	text = "";
@@ -544,6 +545,7 @@ export class FakeEl {
 
 	empty(): void {
 		this.children = [];
+		this.__settings = [];
 	}
 
 	createEl(tag: string, opts?: { cls?: string; text?: string }): FakeEl {
@@ -561,6 +563,13 @@ export class FakeEl {
 class ValueComponent<T> {
 	value!: T;
 	protected _onChange?: (value: T) => any;
+
+	// Test helper: simulate the user typing, awaiting the registered handler.
+	async __type(value: T): Promise<void> {
+		this.value = value;
+		this.inputEl.value = String(value);
+		await this._onChange?.(value);
+	}
 	inputEl: { rows: number; cols: number; value: string } = {
 		rows: 0,
 		cols: 0,
@@ -586,13 +595,19 @@ class ValueComponent<T> {
 export class TextComponent extends ValueComponent<string> {}
 export class TextAreaComponent extends ValueComponent<string> {}
 
-// The settings tab is not exercised by the current suite. This inert skeleton
-// exists so main.ts's display() typechecks against the mock (npm run
-// typecheck:test) and so addSettingTab survives onload.
+// Records enough for a test to find a setting by name and drive its input. The
+// mappings textarea carries real logic — debounced validation, a flush on close
+// — so it needs to be reachable.
 export class Setting {
-	constructor(public containerEl: FakeEl) {}
+	name = "";
+	components: ValueComponent<any>[] = [];
 
-	setName(_name: string): this {
+	constructor(public containerEl: FakeEl) {
+		containerEl.__settings.push(this);
+	}
+
+	setName(name: string): this {
+		this.name = name;
 		return this;
 	}
 
@@ -605,12 +620,16 @@ export class Setting {
 	}
 
 	addText(cb: (t: TextComponent) => any): this {
-		cb(new TextComponent());
+		const c = new TextComponent();
+		this.components.push(c);
+		cb(c);
 		return this;
 	}
 
 	addTextArea(cb: (t: TextAreaComponent) => any): this {
-		cb(new TextAreaComponent());
+		const c = new TextAreaComponent();
+		this.components.push(c);
+		cb(c);
 		return this;
 	}
 }
@@ -625,6 +644,11 @@ export class PluginSettingTab {
 	}
 
 	hide(): void {
-		/* no-op */
+		/* overridden */
+	}
+
+	// Test helper: find a Setting by its displayed name.
+	__setting(name: string): Setting | undefined {
+		return this.containerEl.__settings.find((s) => s.name === name);
 	}
 }

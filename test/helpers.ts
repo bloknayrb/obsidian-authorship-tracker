@@ -24,7 +24,10 @@ export const DEBOUNCE = 1000;
 export const TEST_NOW = new Date(2026, 7, 25, 12, 0, 0);
 
 export function installFakeClock(): void {
-	vi.useFakeTimers();
+	// performance is deliberately left real: src/patterns.ts measures how long a
+	// regex takes to run, and a frozen monotonic clock would report every pattern
+	// as instantaneous.
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 	vi.setSystemTime(TEST_NOW);
 }
 

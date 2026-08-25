@@ -76,3 +76,20 @@ describe("delete", () => {
 		expect(cache.get("c")).toBe("3");
 	});
 });
+
+describe("clear", () => {
+	it("empties the cache but keeps its capacity", () => {
+		const cache = new LRUCache<string, string>(2);
+		cache.set("a", "1");
+		cache.set("b", "2");
+		cache.clear();
+
+		expect(cache.size).toBe(0);
+		expect(cache.get("a")).toBeUndefined();
+
+		cache.set("c", "3");
+		cache.set("d", "4");
+		expect(cache.size).toBe(2);
+		expect(cache.get("c")).toBe("3");
+	});
+});

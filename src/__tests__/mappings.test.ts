@@ -3,7 +3,7 @@ import {
 	getAutoImportResult,
 	parseMappings,
 	serializeMappings,
-	invalidPatterns,
+	patternProblems,
 	AutoImportMapping,
 } from "../mappings";
 
@@ -71,6 +71,18 @@ describe("parse/serialize round-trip", () => {
 		expect(parseMappings(text)).toEqual(mappings);
 	});
 
+	it("keeps alternations inside a pattern rather than truncating at the pipe", () => {
+		// Only the first two pipes delimit fields. Splitting naively stored
+		// "(Notes|Transcript)-.*\\.md$" as "(Notes", which then reported itself as
+		// invalid syntax.
+		const parsed = parseMappings(
+			"Meetings=importer:x|primary|(Notes|Transcript)-.*\\.md$",
+		);
+		expect(parsed[0].filenamePattern).toBe("(Notes|Transcript)-.*\\.md$");
+		// And it survives a round trip through the textarea format.
+		expect(parseMappings(serializeMappings(parsed))).toEqual(parsed);
+	});
+
 	it("skips malformed lines and defaults the content origin", () => {
 		const parsed = parseMappings("Emails=importer:email\nnonsense\n=lonely");
 		expect(parsed).toEqual([
@@ -79,12 +91,36 @@ describe("parse/serialize round-trip", () => {
 	});
 });
 
-describe("invalidPatterns", () => {
-	it("flags only unparseable regexes", () => {
+describe("patternProblems", () => {
+	it("reports unparseable regexes with a reason", () => {
 		const list: AutoImportMapping[] = [
 			{ folder: "A", author: "a", contentOrigin: "primary", filenamePattern: "^ok$" },
 			{ folder: "B", author: "b", contentOrigin: "primary", filenamePattern: "(" },
 		];
-		expect(invalidPatterns(list)).toEqual(["("]);
+		expect(patternProblems(list)).toEqual([
+			{ pattern: "(", problem: "invalid-syntax" },
+		]);
+	});
+
+	it("reports patterns that would freeze the UI", () => {
+		const list: AutoImportMapping[] = [
+			{ folder: "A", author: "a", contentOrigin: "primary", filenamePattern: "(a+)+$" },
+		];
+		expect(patternProblems(list)).toEqual([
+			{ pattern: "(a+)+$", problem: "too-slow" },
+		]);
+	});
+
+	it("says nothing about mappings with no pattern, or with good ones", () => {
+		const list: AutoImportMapping[] = [
+			{ folder: "A", author: "a", contentOrigin: "primary" },
+			{
+				folder: "B",
+				author: "b",
+				contentOrigin: "primary",
+				filenamePattern: "^Transcript-",
+			},
+		];
+		expect(patternProblems(list)).toEqual([]);
 	});
 });
