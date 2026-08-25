@@ -298,12 +298,19 @@ describe("AuthorshipTrackerPlugin", () => {
 				"Emails/msg.md",
 				"---\ncreated_by: original\n---\n# hi\n",
 			);
+			// Positive control: a sibling with no creator, created in the same burst,
+			// IS stamped — so the assertions below are about the existing field, not
+			// about auto-import being wired up wrong.
+			await app.vault.create("Emails/fresh.md", "# hi\n");
 			await vi.advanceTimersByTimeAsync(AUTO_IMPORT_STAMP_DELAY_MS);
 
 			expect(readFrontMatter(app, "Emails/msg.md").created_by).toBe(
 				"original",
 			);
-			expect(readLog(app)).toHaveLength(0);
+			expect(readFrontMatter(app, "Emails/fresh.md").created_by).toBe(
+				"importer:email",
+			);
+			expect(readLog(app).map((e) => e.file)).toEqual(["Emails/fresh.md"]);
 		});
 
 		it("survives a file deleted inside the settle window", async () => {
@@ -312,10 +319,18 @@ describe("AuthorshipTrackerPlugin", () => {
 
 			const file = await app.vault.create("Emails/msg.md", "# hi\n");
 			await app.vault.delete(file);
-			await expect(
-				vi.advanceTimersByTimeAsync(AUTO_IMPORT_STAMP_DELAY_MS),
-			).resolves.not.toThrow();
-			expect(readLog(app)).toHaveLength(0);
+			// Positive control: a sibling that survives the window IS stamped, so
+			// "no log line for the deleted file" cannot pass on dead create wiring.
+			await app.vault.create("Emails/survivor.md", "# hi\n");
+
+			await vi.advanceTimersByTimeAsync(AUTO_IMPORT_STAMP_DELAY_MS);
+
+			// No assertion on "did not throw": handleCreate swallows errors through
+			// notifyError, so it could never throw here regardless. Assert instead
+			// that nothing was logged for the vanished file, and that no error
+			// Notice was raised.
+			expect(readLog(app).map((e) => e.file)).toEqual(["Emails/survivor.md"]);
+			expect(__notices).toEqual([]);
 		});
 	});
 

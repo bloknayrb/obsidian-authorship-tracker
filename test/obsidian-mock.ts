@@ -423,14 +423,18 @@ export class Workspace extends Events {
 
 	// ── Test helpers ──────────────────────────────────────────────────────────
 
-	// Open `file` in a new leaf and make it active. Returns the view so a test can
-	// drive its editor.
+	// Open `file` in a new leaf and make it active, firing active-leaf-change as
+	// Obsidian does. The plugin warms its diff cache from that event, so a mock
+	// that stayed silent would leave that handler untested.
 	__openLeaf(file: TFile, content = "", makeActive = true): MarkdownView {
 		const leaf = new WorkspaceLeaf(this.app);
 		const view = new MarkdownView(this.app, file, content);
 		leaf.view = view;
 		this._leaves.push(leaf);
-		if (makeActive) this.activeLeaf = leaf;
+		if (makeActive) {
+			this.activeLeaf = leaf;
+			this.trigger("active-leaf-change", leaf);
+		}
 		return view;
 	}
 }

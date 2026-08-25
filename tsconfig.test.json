@@ -19,5 +19,10 @@
   // `extends` REPLACES rather than merges `exclude`. Omitting it here would
   // inherit the base config's exclusion of test files and this step would
   // silently check nothing.
-  "exclude": ["node_modules"]
+  //
+  // mock-conformance.ts must NOT be compiled here: it exists to compare the mock
+  // against the real obsidian.d.ts, and under this config's paths override its
+  // `Real*` imports resolve to the mock too, so it would compare the mock with
+  // itself and report failures as "the real Obsidian API is missing X".
+  "exclude": ["node_modules", "test/mock-conformance.ts"]
 }

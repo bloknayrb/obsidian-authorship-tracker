@@ -31,15 +31,34 @@ describe("harness smoke test", () => {
 		vi.useRealTimers();
 	});
 
-	it("resolves `../main` to the TypeScript source, not the built bundle", () => {
-		// Vite orders .js ahead of .ts by default, and the production bundle is
-		// emitted to ./main.js beside the source. Without resolve.extensions putting
-		// .ts first, this module specifier picks up a stale artifact.
+	it("loads the plugin module at all", () => {
+		// Not a resolver guard. esbuild re-exports every named export, so nothing
+		// observable at runtime distinguishes ../main.ts from a built ../main.js —
+		// an earlier version of this test claimed to and did not.
 		//
-		// Asserted via a named export that only the SOURCE has: the bundle is CJS
-		// with a single default export, so `typeof Plugin === "function"` alone
-		// would not distinguish them.
+		// What actually protects us is that the CJS bundle's require("obsidian")
+		// is not rewritten by the vite alias, so if resolve.extensions ever stopped
+		// putting ".ts" first, this import would throw MODULE_NOT_FOUND and every
+		// test in the suite would fail loudly. The knowledge lives in the
+		// vitest.config.ts comment; this only pins that the module loads.
+		expect(typeof AuthorshipTrackerPlugin).toBe("function");
 		expect(AUTO_IMPORT_STAMP_DELAY_MS).toBe(3000);
+	});
+
+	it("warms the diff cache on active-leaf-change", async () => {
+		// main.ts registers an active-leaf-change handler to snapshot a note's
+		// content as the diff baseline. Nothing else in the suite exercises it.
+		const file = app.vault.__seed("Notes/a.md", "# A\n\n## One\n\nbody\n");
+		plugin = await boot(app);
+
+		// Opening the leaf fires active-leaf-change, seeding the baseline. The edit
+		// then adds a section, so the summary must name it rather than falling back
+		// to the no-baseline wording.
+		await edit(app, file, "# A\n\n## One\n\nbody\n\n## Two\n\nmore\n");
+
+		const [entry] = readLog(app);
+		expect(entry.summary).toContain("## Two");
+		expect(entry.summary).not.toContain("no cached baseline");
 	});
 
 	it("stamps frontmatter and writes a log line for a real edit", async () => {
