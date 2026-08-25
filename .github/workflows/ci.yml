@@ -15,18 +15,19 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Typecheck
-        run: npx tsc -noEmit -skipLibCheck -p tsconfig.json
-
-      - name: Test
-        run: npm test
+      # Lint, typecheck (against the real Obsidian API), typecheck the tests
+      # (against the mock), and run the suite. Defined in package.json so CI and
+      # contributors run an identical gate with one command.
+      #
+      # release.yml does NOT run this yet -- a tag can still publish without any
+      # of these checks. That is issue #5, stacked behind this PR.
+      - name: Verify
+        run: npm run verify
 
       - name: Build
         run: node esbuild.config.mjs production

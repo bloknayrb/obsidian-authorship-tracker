@@ -12,6 +12,6 @@
     "strictNullChecks": true,
     "lib": ["ES6", "DOM"]
   },
-  "include": ["main.ts", "src/**/*.ts"],
+  "include": ["main.ts", "src/**/*.ts", "test/mock-conformance.ts"],
   "exclude": ["node_modules", "src/**/*.test.ts", "src/__tests__/**"]
 }

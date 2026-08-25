@@ -28,7 +28,7 @@ import { formatLocalTimestamp, localDateString } from "./src/time";
 
 // How long to wait after a file is created in an auto-import folder before
 // stamping it, giving external importers / templates time to finish writing.
-const AUTO_IMPORT_STAMP_DELAY_MS = 3000;
+export const AUTO_IMPORT_STAMP_DELAY_MS = 3000;
 // Fallback author used when no author name is configured.
 const FALLBACK_AUTHOR = "me";
 // Minimum interval between user-facing error notices, to avoid spamming.

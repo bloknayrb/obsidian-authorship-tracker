@@ -7,9 +7,12 @@
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck -p tsconfig.json && node esbuild.config.mjs production",
     "lint": "eslint .",
+    "typecheck": "tsc -noEmit -skipLibCheck -p tsconfig.json",
+    "typecheck:test": "tsc -noEmit -skipLibCheck -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "version": "node version-bump.mjs && git add manifest.json versions.json"
+    "version": "node version-bump.mjs && git add manifest.json versions.json",
+    "verify": "npm run lint && npm run typecheck && npm run typecheck:test && npm test"
   },
   "keywords": [
     "obsidian",
