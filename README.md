@@ -60,27 +60,27 @@ creator — but only when you actually edit it, not merely because the file exis
 
 Authorship Tracker runs entirely inside your vault:
 
-- **No network requests.** The plugin never contacts a server. This is enforced in CI,
-  not just asserted — `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource` and the node
-  `http`/`https` modules are lint errors in this codebase.
+- **No network requests.** The plugin never contacts a server. Lint rules keep it that
+  way rather than leaving it to review: `fetch` (bare, and via `window`/`globalThis`/
+  `self`), `XMLHttpRequest`, `WebSocket`, `EventSource`, `navigator.sendBeacon`, the node
+  `http`/`https` modules, and Obsidian's own `requestUrl`/`request` are all errors. That
+  is a guard against accidental reintroduction, not a sandbox — it catches the ways a
+  request would realistically be written, not every conceivable one.
 - **No telemetry or analytics.** Nothing about your usage is collected or transmitted.
 - **No third-party code.** `package.json` has no runtime dependencies at all, and the
   published `main.js` contains exactly one external reference: `require("obsidian")`.
 
-What it *does* write, all of it inside your vault and readable in a text editor:
+Everything it writes stays inside your vault and is readable in a text editor:
+[frontmatter](#the-fields-it-writes) on the notes you edit, and a
+[daily JSONL log](#the-daily-log).
 
-- YAML frontmatter on the notes you edit (`created_by`, `content_origin`,
-  `last_modified_by`, `edit_count`)
-- a daily JSONL log in the folder you configure, containing note paths, your author
-  name, timestamps, and short summaries that include `## ` heading text from the notes
-  you edited
+Worth stating plainly, because "no telemetry" alone would be misleading: **the log
+describes your notes.** Its entries contain note paths and short summaries that include
+`## ` heading text from the notes you edited. It travels wherever your vault travels — if
+you sync, the logs sync. Put the log folder in an ignored path, or set retention, if that
+matters to you.
 
-That last point is worth stating plainly: **the log describes your notes**, so it travels
-wherever your vault travels. If you sync your vault, the logs sync too. Put the log
-folder in an ignored path, or set retention, if that matters to you.
-
-Two things outside this plugin's control: Obsidian itself checks for plugin updates, and
-the links in this README are documentation, not runtime behaviour.
+One thing outside this plugin's control: Obsidian itself checks for plugin updates.
 
 ## The fields it writes
 
@@ -283,24 +283,22 @@ Edit `manifest.json`'s version by hand and the `versions.json` check will catch 
 
 ### Pre-release smoke tests
 
-The automated suite covers plugin logic against a mocked Obsidian API; these are the
-checks that need a real vault. Run them against a scratch vault with the built `main.js`
-installed.
+Most behaviour is already covered by `npm test` against a mocked Obsidian API — edits,
+debouncing, ignore rules, focus changes, auto-import, logging, retention, and unload are
+all asserted there, so re-checking them by hand is busywork that makes the whole list
+easy to skip.
 
-| Scenario | Steps | Expected |
+These are the ones a mock cannot prove. Run them against a scratch vault with the built
+`main.js` installed.
+
+| Scenario | Why a mock can't cover it | Expected |
 |---|---|---|
-| Clean vault | Enable the plugin in an empty vault | Loads with no errors; no files created until the first tracked edit |
-| Normal edits | Type in a note, wait out the debounce | `created_by`, `content_origin`, `last_modified_by`, `edit_count` appear; one log line with a section-level summary. Edit again → `edit_count` increments |
-| No-op edit | Type, undo back to the original, wait | No new log line, `edit_count` unchanged |
-| Ignored paths | Edit a note under `Templates/`, and one named in *Ignored files* | No frontmatter change, no log line, while a normal note edited in the same session **is** stamped |
-| External writers | Modify a note outside Obsidian (editor, CLI, sync) | No frontmatter change and no log line — the plugin only reacts to typing in the editor |
-| Focus changes | Edit a note, then immediately switch tabs before the debounce fires | The **edited** note is stamped, not the one now in focus. Repeat with a split pane |
-| Auto-import | Drop a file into a mapped folder | After ~3s it carries the mapped `created_by`/`content_origin` and a `"created"` log line. A non-matching filename in the same folder is untouched |
-| Bad pattern | Paste `(a+)+$` as a filename pattern and click away | A notice names the pattern and the reason; Obsidian does not freeze; that mapping stops matching but others still work |
-| Logging | Check the log folder | `<path>/YYYY-MM-DD.jsonl`, one JSON object per line, appended not overwritten |
-| Retention | Set retention to 1 and **restart Obsidian** | Today's and yesterday's logs survive; older ones are deleted. Non-log files in that folder are untouched |
-| Disable / re-enable | Type, then disable the plugin mid-debounce | The pending edit is dropped rather than written. Re-enable → tracking resumes with no duplicate stamps |
-| Mobile | Install on iOS or Android | Plugin loads (`isDesktopOnly: false`, no Node or Electron APIs used), edits stamp, logs write |
+| Clean vault | Real plugin load against a real Obsidian build | Enables with no console errors; no files created until the first tracked edit |
+| External writers | Requires a real write from outside Obsidian | Modify a note via another editor, the CLI, or sync → **no** frontmatter change and **no** log line |
+| Bad filename pattern | The freeze is a real-UI symptom; tests assert the validator, not the app | Paste `(a+)+$` as a pattern and click away → a notice names the pattern and the reason, Obsidian stays responsive, other mappings keep working |
+| Retention across a restart | Pruning runs at load, so it needs a genuine restart | Set retention to 1, restart Obsidian → today's and yesterday's logs survive, older ones are gone, non-log files untouched |
+| Mobile | No mobile runtime in CI | Install on iOS or Android → plugin loads (`isDesktopOnly: false`), edits stamp, logs write |
+| Vault sync | Sync behaviour is outside the plugin entirely | With sync enabled, confirm the log folder syncs as expected — or is excluded, if you configured that |
 
 ## License
 

@@ -6,9 +6,7 @@
     "browser": true,
     "es2021": true
   },
-  "plugins": [
-    "@typescript-eslint"
-  ],
+  "plugins": ["@typescript-eslint"],
   "extends": [
     "eslint:recommended",
     "plugin:@typescript-eslint/recommended"
@@ -24,59 +22,49 @@
     "version-bump.mjs"
   ],
   "rules": {
-    "no-undef": "off",
-    "no-unused-vars": "off",
-    "@typescript-eslint/no-unused-vars": [
-      "warn",
-      {
-        "argsIgnorePattern": "^_"
-      }
-    ],
-    "@typescript-eslint/no-explicit-any": "warn",
-    "@typescript-eslint/ban-ts-comment": "off",
-    "no-prototype-builtins": "off",
-    "@typescript-eslint/no-empty-function": "off",
     "no-restricted-globals": [
       "error",
-      {
-        "name": "fetch",
-        "message": "This plugin makes no network requests (see README > Privacy). If that changes, update the README first."
-      },
-      {
-        "name": "XMLHttpRequest",
-        "message": "This plugin makes no network requests (see README > Privacy). If that changes, update the README first."
-      },
-      {
-        "name": "WebSocket",
-        "message": "This plugin makes no network requests (see README > Privacy). If that changes, update the README first."
-      },
-      {
-        "name": "EventSource",
-        "message": "This plugin makes no network requests (see README > Privacy). If that changes, update the README first."
-      }
+      { "name": "fetch", "message": "No network requests - see README > Privacy." },
+      { "name": "XMLHttpRequest", "message": "No network requests - see README > Privacy." },
+      { "name": "WebSocket", "message": "No network requests - see README > Privacy." },
+      { "name": "EventSource", "message": "No network requests - see README > Privacy." }
+    ],
+    "no-restricted-properties": [
+      "error",
+      { "object": "window", "property": "fetch", "message": "No network requests - see README > Privacy." },
+      { "object": "globalThis", "property": "fetch", "message": "No network requests - see README > Privacy." },
+      { "object": "self", "property": "fetch", "message": "No network requests - see README > Privacy." },
+      { "object": "window", "property": "XMLHttpRequest", "message": "No network requests - see README > Privacy." },
+      { "object": "globalThis", "property": "XMLHttpRequest", "message": "No network requests - see README > Privacy." },
+      { "object": "navigator", "property": "sendBeacon", "message": "No network requests - see README > Privacy." }
     ],
     "no-restricted-imports": [
       "error",
       {
+        "patterns": [
+          {
+            "group": ["http", "https", "node:http", "node:https"],
+            "message": "No network requests - see README > Privacy."
+          }
+        ],
         "paths": [
           {
-            "name": "http",
-            "message": "This plugin makes no network requests (see README > Privacy)."
-          },
-          {
-            "name": "https",
-            "message": "This plugin makes no network requests (see README > Privacy)."
-          },
-          {
-            "name": "node:http",
-            "message": "This plugin makes no network requests (see README > Privacy)."
-          },
-          {
-            "name": "node:https",
-            "message": "This plugin makes no network requests (see README > Privacy)."
+            "name": "obsidian",
+            "importNames": ["requestUrl", "request"],
+            "message": "No network requests - see README > Privacy."
           }
         ]
       }
-    ]
+    ],
+    "no-undef": "off",
+    "no-unused-vars": "off",
+    "@typescript-eslint/no-unused-vars": [
+      "warn",
+      { "argsIgnorePattern": "^_" }
+    ],
+    "@typescript-eslint/no-explicit-any": "warn",
+    "@typescript-eslint/ban-ts-comment": "off",
+    "no-prototype-builtins": "off",
+    "@typescript-eslint/no-empty-function": "off"
   }
 }
