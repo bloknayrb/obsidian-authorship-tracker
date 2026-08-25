@@ -28,6 +28,17 @@ export class LRUCache<K, V> {
 		this.cache.set(key, value);
 	}
 
+	// Forget a key entirely. Used when a note is deleted or renamed, so the diff
+	// baseline does not outlive the path it belongs to.
+	delete(key: K): boolean {
+		return this.cache.delete(key);
+	}
+
+	// Drop every entry, keeping the configured capacity.
+	clear(): void {
+		this.cache.clear();
+	}
+
 	resize(newMax: number): void {
 		this.maxSize = Math.max(1, newMax);
 		while (this.cache.size > this.maxSize) {

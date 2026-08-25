@@ -56,6 +56,32 @@ every existing file when it first loads.
 When you type in a note that has no `created_by` field yet, the plugin records you as the
 creator — but only when you actually edit it, not merely because the file exists.
 
+## Privacy
+
+Authorship Tracker runs entirely inside your vault:
+
+- **No network requests.** The plugin never contacts a server. Lint rules keep it that
+  way rather than leaving it to review: `fetch` (bare, and via `window`/`globalThis`/
+  `self`), `XMLHttpRequest`, `WebSocket`, `EventSource`, `navigator.sendBeacon`, the node
+  `http`/`https` modules, and Obsidian's own `requestUrl`/`request` are all errors. That
+  is a guard against accidental reintroduction, not a sandbox — it catches the ways a
+  request would realistically be written, not every conceivable one.
+- **No telemetry or analytics.** Nothing about your usage is collected or transmitted.
+- **No third-party code.** `package.json` has no runtime dependencies at all, and the
+  published `main.js` contains exactly one external reference: `require("obsidian")`.
+
+Everything it writes stays inside your vault and is readable in a text editor:
+[frontmatter](#the-fields-it-writes) on the notes you edit, and a
+[daily JSONL log](#the-daily-log).
+
+Worth stating plainly, because "no telemetry" alone would be misleading: **the log
+describes your notes.** Its entries contain note paths and short summaries that include
+`## ` heading text from the notes you edited. It travels wherever your vault travels — if
+you sync, the logs sync. Put the log folder in an ignored path, or set retention, if that
+matters to you.
+
+One thing outside this plugin's control: Obsidian itself checks for plugin updates.
+
 ## The fields it writes
 
 | Field | Meaning |
@@ -105,7 +131,7 @@ line-count delta for flat documents.
 | Ignored folders | Templates, Excalidraw, .obsidian | Folders excluded from tracking (matched at any depth) |
 | Ignored files | _(none)_ | File names excluded from tracking |
 | Edit logs path | `Authorship Logs` | Where daily JSONL logs are written |
-| Log retention | `0` (keep all) | Delete logs older than N days |
+| Log retention | `0` (keep all) | Delete logs older than N whole calendar days (`1` keeps today and yesterday) |
 | Auto-import folders | _(none)_ | Folder → source mappings (see below) |
 
 ### Auto-import folder mappings
@@ -127,6 +153,29 @@ Meetings=importer:notes|ai-derived|^Notes-
 The optional third field is a regular expression matched against the file name, so a
 single folder can route different file types to different sources. Files that match no
 mapping are left untouched.
+
+Only the first two `|` separate fields, so a pattern may contain alternations of its
+own — `Meetings=importer:notes|ai-derived|(Notes|Summary)-.*\.md$` works as written.
+
+#### Pattern limits
+
+The match runs on the UI thread while Obsidian is handling a vault event, so a regex
+that backtracks catastrophically can freeze the app. `(a+)+$` against a thirty-character
+filename takes about twelve seconds — this is not bounded by how short filenames are.
+
+Patterns are therefore checked before use: anything over 200 characters is refused, and
+each pattern is run against short adversarial inputs and timed. One that is measurably
+slow on a 24-character probe is rejected, because that is what a hang on a real filename
+looks like early. A rejected pattern is reported in settings and again on load, and its
+mapping simply never matches — it is **not** downgraded to matching every file in the
+folder.
+
+This is a practical check, not a guarantee. It has no false positives on ordinary
+patterns and catches the known catastrophic shapes, but it cannot promise to catch every
+possible one; a pattern that slips through and proves slow in use is disabled for the
+rest of the session the first time it is measured. Keep patterns simple — anchored
+prefixes like `^Transcript-` are the intended use, and nested quantified groups such as
+`(\w+)+` are worth avoiding regardless.
 
 ## Querying the data
 
@@ -187,6 +236,16 @@ Then copy `main.js`, `manifest.json`, and `styles.css` into
 - **`content_origin` is set at creation** — heavily revising an AI-generated note does
   not change its origin. This is intentional: original provenance is what matters for
   citation decisions.
+- **Filename patterns are screened, not sandboxed** — see [Pattern limits](#pattern-limits).
+  A pattern that survives screening and later proves slow is disabled after its first
+  slow match, not before it.
+- **Log pruning runs at load** — retention is applied when the plugin starts, so a
+  vault left open for days will not prune until Obsidian is restarted.
+- **Disabling the plugin cancels pending work** — an edit still inside its debounce
+  window, or an auto-import file still inside its settle delay, is dropped rather than
+  written, and a stamp already in flight is abandoned before it writes. The one thing
+  a disabled plugin may still do is finish rewriting a file it had already opened,
+  leaving its contents unchanged.
 
 ## Development
 
@@ -200,6 +259,46 @@ npm run build    # typecheck + production build
 
 The pure logic (diffing, the LRU cache, folder matching, mapping parsing, time
 formatting) lives in `src/` and is unit tested with [Vitest](https://vitest.dev/).
+
+### Releasing
+
+```bash
+npm version <x.y.z>   # runs version-bump.mjs, stages manifest.json + versions.json
+git push && git push --tags
+```
+
+Pushing the tag runs `.github/workflows/release.yml`, which refuses to publish unless:
+
+- the tag equals `manifest.json`'s version **exactly**, with no `v` prefix — Obsidian's
+  plugin updater requires this, and `.npmrc` clears npm's default `v` so `npm version`
+  produces the right tag
+- `package.json`'s version matches too
+- `versions.json` maps that version to the manifest's `minAppVersion`
+- `npm run verify` passes (lint, both typechecks, the full suite)
+
+Steps are fail-fast, so any failure means no GitHub Release is created.
+
+Edit `manifest.json`'s version by hand and the `versions.json` check will catch it — use
+`npm version` so `version-bump.mjs` keeps the two in step.
+
+### Pre-release smoke tests
+
+Most behaviour is already covered by `npm test` against a mocked Obsidian API — edits,
+debouncing, ignore rules, focus changes, auto-import, logging, retention, and unload are
+all asserted there, so re-checking them by hand is busywork that makes the whole list
+easy to skip.
+
+These are the ones a mock cannot prove. Run them against a scratch vault with the built
+`main.js` installed.
+
+| Scenario | Why a mock can't cover it | Expected |
+|---|---|---|
+| Clean vault | Real plugin load against a real Obsidian build | Enables with no console errors; no files created until the first tracked edit |
+| External writers | Requires a real write from outside Obsidian | Modify a note via another editor, the CLI, or sync → **no** frontmatter change and **no** log line |
+| Bad filename pattern | The freeze is a real-UI symptom; tests assert the validator, not the app | Paste `(a+)+$` as a pattern and click away → a notice names the pattern and the reason, Obsidian stays responsive, other mappings keep working |
+| Retention across a restart | Pruning runs at load, so it needs a genuine restart | Set retention to 1, restart Obsidian → today's and yesterday's logs survive, older ones are gone, non-log files untouched |
+| Mobile | No mobile runtime in CI | Install on iOS or Android → plugin loads (`isDesktopOnly: false`), edits stamp, logs write |
+| Vault sync | Sync behaviour is outside the plugin entirely | With sync enabled, confirm the log folder syncs as expected — or is excluded, if you configured that |
 
 ## License
 

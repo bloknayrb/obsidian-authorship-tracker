@@ -24,7 +24,10 @@ export const DEBOUNCE = 1000;
 export const TEST_NOW = new Date(2026, 7, 25, 12, 0, 0);
 
 export function installFakeClock(): void {
-	vi.useFakeTimers();
+	// performance is deliberately left real: src/patterns.ts measures how long a
+	// regex takes to run, and a frozen monotonic clock would report every pattern
+	// as instantaneous.
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 	vi.setSystemTime(TEST_NOW);
 }
 
@@ -46,12 +49,27 @@ export async function boot(
 	return plugin;
 }
 
+// Set an already-open view's buffer and fire editor-change, without advancing the
+// clock and without opening a new leaf.
+//
+// Reopening a leaf re-seeds the diff baseline from the vault copy via
+// active-leaf-change, which by then carries frontmatter the editor buffer does
+// not — so any test comparing successive edits of the same note must reuse one
+// view and go through here.
+export function fireEditIn(
+	app: App,
+	view: MarkdownView,
+	content: string,
+): MarkdownView {
+	view.editor.setValue(content);
+	app.workspace.trigger("editor-change", view.editor, view);
+	return view;
+}
+
 // Open `file` in a leaf with `content` and fire editor-change, WITHOUT advancing
 // the clock. For tests that need to act inside the debounce window.
 export function fireEdit(app: App, file: TFile, content: string): MarkdownView {
-	const view = app.workspace.__openLeaf(file, content);
-	app.workspace.trigger("editor-change", view.editor, view);
-	return view;
+	return fireEditIn(app, app.workspace.__openLeaf(file, content), content);
 }
 
 // Fire an edit and advance past the debounce so the stamp completes.
@@ -68,6 +86,16 @@ export async function edit(
 	const view = fireEdit(app, file, content);
 	await vi.advanceTimersByTimeAsync(DEBOUNCE);
 	return view;
+}
+
+// Seed daily-log fixtures. Dates are bare "YYYY-MM-DD"; the suite clock is
+// pinned to TEST_NOW.
+export function seedLogs(
+	app: App,
+	dates: string[],
+	dir = "Authorship Logs",
+): void {
+	for (const d of dates) app.vault.__seed(`${dir}/${d}.jsonl`, "{}\n");
 }
 
 export function logPathForToday(dir = "Authorship Logs"): string {

@@ -49,3 +49,47 @@ describe("LRUCache", () => {
 		expect(cache.get("c")).toBe(3);
 	});
 });
+
+describe("delete", () => {
+	it("forgets a key and reports whether it was present", () => {
+		const cache = new LRUCache<string, string>(3);
+		cache.set("a", "1");
+		cache.set("b", "2");
+
+		expect(cache.delete("a")).toBe(true);
+		expect(cache.get("a")).toBeUndefined();
+		expect(cache.get("b")).toBe("2");
+		expect(cache.size).toBe(1);
+
+		expect(cache.delete("a")).toBe(false);
+		expect(cache.delete("nope")).toBe(false);
+	});
+
+	it("frees capacity so a later set does not evict a survivor", () => {
+		const cache = new LRUCache<string, string>(2);
+		cache.set("a", "1");
+		cache.set("b", "2");
+		cache.delete("a");
+		cache.set("c", "3");
+
+		expect(cache.get("b")).toBe("2");
+		expect(cache.get("c")).toBe("3");
+	});
+});
+
+describe("clear", () => {
+	it("empties the cache but keeps its capacity", () => {
+		const cache = new LRUCache<string, string>(2);
+		cache.set("a", "1");
+		cache.set("b", "2");
+		cache.clear();
+
+		expect(cache.size).toBe(0);
+		expect(cache.get("a")).toBeUndefined();
+
+		cache.set("c", "3");
+		cache.set("d", "4");
+		expect(cache.size).toBe(2);
+		expect(cache.get("c")).toBe("3");
+	});
+});
