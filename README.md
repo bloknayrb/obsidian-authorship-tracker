@@ -191,7 +191,9 @@ Then copy `main.js`, `manifest.json`, and `styles.css` into
   vault left open for days will not prune until Obsidian is restarted.
 - **Disabling the plugin cancels pending work** — an edit still inside its debounce
   window, or an auto-import file still inside its settle delay, is dropped rather than
-  written. A disabled plugin never touches the vault.
+  written, and a stamp already in flight is abandoned before it writes. The one thing
+  a disabled plugin may still do is finish rewriting a file it had already opened,
+  leaving its contents unchanged.
 
 ## Development
 

@@ -186,6 +186,9 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 		// initial vault-indexing stampede where vault.on('create') fires for
 		// every existing file during plugin load.
 		this.app.workspace.onLayoutReady(() => {
+			// The plugin may have been disabled while the vault was still indexing.
+			if (this._unloaded) return;
+
 			this.registerEvent(
 				this.app.vault.on("create", (file) => {
 					if (!(file instanceof TFile)) return;
@@ -335,8 +338,12 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 	}
 
 	private async handleEdit(file: TFile, currentContent: string) {
-		if (this._stampInProgress.has(file.path)) return;
-		this._stampInProgress.add(file.path);
+		// Capture the key: a rename mid-stamp mutates TFile.path in place, and
+		// releasing under the new path would strand the old one — permanently
+		// blocking any note that later occupies it.
+		const stampKey = file.path;
+		if (this._stampInProgress.has(stampKey)) return;
+		this._stampInProgress.add(stampKey);
 
 		const cachedContent = this._contentCache.get(file.path) ?? "";
 		const author = this.authorName();
@@ -350,6 +357,12 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 
 		try {
 			await this.app.fileManager.processFrontMatter(file, (fm) => {
+				// Last point at which an in-flight stamp can still be abandoned:
+				// processFrontMatter reads the file before invoking this, so the
+				// plugin may have been disabled in between. Returning without
+				// mutating leaves the frontmatter untouched.
+				if (this._unloaded) return;
+
 				// Only claim creation if no creator is recorded yet AND the file
 				// is not owned by an auto-import mapping (whose create handler
 				// sets the authoritative origin). Never overwrite an existing
@@ -384,13 +397,14 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 		} catch (err) {
 			this.notifyError("Failed to stamp edit", err);
 		} finally {
-			this._stampInProgress.delete(file.path);
+			this._stampInProgress.delete(stampKey);
 		}
 	}
 
 	private async handleCreate(file: TFile) {
-		if (this._stampInProgress.has(file.path)) return;
-		this._stampInProgress.add(file.path);
+		const stampKey = file.path;
+		if (this._stampInProgress.has(stampKey)) return;
+		this._stampInProgress.add(stampKey);
 
 		// Determine author + content origin from the auto-import mapping.
 		const result = getAutoImportResult(
@@ -433,11 +447,14 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 		} catch (err) {
 			this.notifyError("Failed to stamp creation", err);
 		} finally {
-			this._stampInProgress.delete(file.path);
+			this._stampInProgress.delete(stampKey);
 		}
 	}
 
 	private async appendLog(entry: LogEntry): Promise<void> {
+		// Reached after awaited frontmatter writes; the plugin may be gone by now.
+		if (this._unloaded) return;
+
 		const dir = normalizePath(this.settings.editLogsPath);
 		const logPath = normalizePath(
 			`${dir}/${localDateString(new Date())}.jsonl`,

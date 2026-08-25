@@ -197,6 +197,77 @@ describe("#3 — attribute a debounced edit to the note that emitted it", () => 
 		expect(readLog(app)).toHaveLength(2);
 	});
 
+	it("abandons a stamp already in flight when the plugin unloads", async () => {
+		// Cancelling timers is not enough: the debounce callback can already have
+		// fired and be awaiting vault.read / processFrontMatter when the user
+		// disables the plugin. Without a check on the write path, the stamp landed
+		// anyway.
+		const a = app.vault.__seed("Notes/a.md", "# A\n");
+		plugin = await boot(app);
+		const view = app.workspace.__openLeaf(a, "# A\n");
+
+		fireEditIn(app, view, "# A\n\nedited\n");
+		// Sync advance fires the timer without draining the async chain it starts.
+		vi.advanceTimersByTime(DEBOUNCE);
+		plugin.onunload();
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(readFrontMatter(app, "Notes/a.md")).toEqual({});
+		expect(readLog(app)).toEqual([]);
+	});
+
+	it("releases the in-progress key under the path it claimed", async () => {
+		// _stampInProgress is keyed by path while the stamp awaits. A rename
+		// mid-stamp mutates TFile.path in place, so releasing under the new path
+		// stranded the old one — and any note later created at that path was
+		// silently never stamped again for the rest of the session.
+		const a = app.vault.__seed("Notes/a.md", "# A\n");
+		plugin = await boot(app);
+		const view = app.workspace.__openLeaf(a, "# A\n");
+
+		fireEditIn(app, view, "# A\n\nedited\n");
+		vi.advanceTimersByTime(DEBOUNCE);
+		await app.vault.rename(a, "Notes/moved.md");
+		await vi.advanceTimersByTimeAsync(10);
+
+		// A different note now occupies the original path.
+		const fresh = app.vault.__seed("Notes/a.md", "# fresh\n");
+		const freshView = app.workspace.__openLeaf(fresh, "# fresh\n");
+		fireEditIn(app, freshView, "# fresh\n\nedited\n");
+		await vi.advanceTimersByTimeAsync(DEBOUNCE);
+
+		expect(readFrontMatter(app, "Notes/a.md").last_modified_by).toBe("tester");
+	});
+
+	it("does not arm the auto-import handler if unloaded before layout-ready", async () => {
+		// The create handler is registered inside onLayoutReady to dodge the
+		// vault-indexing stampede. A user who disables the plugin while the vault
+		// is still indexing would otherwise get a handler armed after unload.
+		plugin = await boot(
+			app,
+			{
+				autoImportFolders: [
+					{
+						folder: "Emails",
+						author: "importer:email",
+						contentOrigin: "primary",
+					},
+				],
+			},
+			{ layoutReady: false },
+		);
+		app.vault.__seedFolder("Emails");
+
+		plugin.onunload();
+		app.workspace.__triggerLayoutReady();
+
+		await app.vault.create("Emails/msg.md", "# hi\n");
+		await vi.advanceTimersByTimeAsync(AUTO_IMPORT_STAMP_DELAY_MS * 2);
+
+		expect(readFrontMatter(app, "Emails/msg.md")).toEqual({});
+		expect(readLog(app)).toEqual([]);
+	});
+
 	it("writes nothing to the vault after unload", async () => {
 		const a = app.vault.__seed("Notes/a.md", "# A\n");
 		plugin = await boot(app, {
