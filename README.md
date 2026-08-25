@@ -192,19 +192,13 @@ LIMIT 20
 
 ## Integrating external writers (optional)
 
-The plugin only captures *your* typing inside Obsidian. If you also want to track edits
-made by AI assistants or scripts, have those writers stamp the **same frontmatter fields**
-and append to the **same JSONL format**. Because the plugin ignores non-editor writes,
-the channels do not conflict:
+The plugin only captures *your* typing inside Obsidian. It does not detect or enforce ordinary or unmapped filesystem edits from AI assistants, scripts, sync clients, or other external writers. The exception is a configured auto-import folder: matching Markdown-file creation there can be stamped with the mapping’s configured source attribution.
 
-- **This plugin** — your edits in Obsidian (`editor-change`)
-- **An AI assistant** (e.g. a Claude Code `PostToolUse` hook) — edits made via the CLI
-- **Automation** (e.g. a scheduled PowerShell/Python script) — imports and bulk updates,
-  writing YAML directly and appending log lines
+For a cooperative record of those writes, configure compatible agents to load the repository’s [external-writer skill](skills/obsidian-authorship-tracker/SKILL.md) and follow the [agent provenance contract](docs/agent-provenance-contract.md). The protocol records a declared agent/automation identity, preserves existing note provenance by default, and appends a versioned JSONL event.
 
-This is just a pattern — nothing about it ships with or is required by the plugin. The
-author's own setup uses Claude Code hooks plus PowerShell scripts feeding the auto-import
-folders above; adapt it to whatever tools you use.
+This is best-effort declared provenance, not identity verification or tamper-evident audit logging. An agent that lacks a configured writer identity, vault log path, timezone, source basis, or unambiguous target must ask rather than guessing. Agents should not write into configured auto-import folders unless you explicitly direct them to do so.
+
+The skill is reference-first: it ships in this repository, but an agent runtime must be configured to load it. It cannot force an arbitrary LLM, script, or untrusted writer to comply.
 
 ## Installation
 
