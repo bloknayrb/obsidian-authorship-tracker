@@ -71,6 +71,18 @@ describe("parse/serialize round-trip", () => {
 		expect(parseMappings(text)).toEqual(mappings);
 	});
 
+	it("keeps alternations inside a pattern rather than truncating at the pipe", () => {
+		// Only the first two pipes delimit fields. Splitting naively stored
+		// "(Notes|Transcript)-.*\\.md$" as "(Notes", which then reported itself as
+		// invalid syntax.
+		const parsed = parseMappings(
+			"Meetings=importer:x|primary|(Notes|Transcript)-.*\\.md$",
+		);
+		expect(parsed[0].filenamePattern).toBe("(Notes|Transcript)-.*\\.md$");
+		// And it survives a round trip through the textarea format.
+		expect(parseMappings(serializeMappings(parsed))).toEqual(parsed);
+	});
+
 	it("skips malformed lines and defaults the content origin", () => {
 		const parsed = parseMappings("Emails=importer:email\nnonsense\n=lonely");
 		expect(parsed).toEqual([

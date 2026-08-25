@@ -64,14 +64,19 @@ export function parseMappings(text: string): AutoImportMapping[] {
 			const eqIdx = line.indexOf("=");
 			const folder = line.slice(0, eqIdx).trim();
 			const rest = line.slice(eqIdx + 1).trim();
+			// Only the first two pipes delimit fields — everything after the second
+			// is the pattern, which may itself contain alternations. Splitting
+			// naively stored `(Notes|Transcript)-.*\.md$` as `(Notes`, which then
+			// reported itself as invalid syntax.
 			const parts = rest.split("|");
 			const mapping: AutoImportMapping = {
 				folder,
 				author: parts[0]?.trim() || "",
 				contentOrigin: parts[1]?.trim() || "primary",
 			};
-			if (parts[2]?.trim()) {
-				mapping.filenamePattern = parts[2].trim();
+			const pattern = parts.slice(2).join("|").trim();
+			if (pattern) {
+				mapping.filenamePattern = pattern;
 			}
 			return mapping;
 		})

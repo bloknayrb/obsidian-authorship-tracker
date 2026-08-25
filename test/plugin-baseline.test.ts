@@ -429,6 +429,77 @@ describe("AuthorshipTrackerPlugin", () => {
 			expect(__notices).toEqual([]);
 		});
 
+		it("debounces mapping validation instead of running it per keystroke", async () => {
+			plugin = await boot(app, { autoImportFolders: [] });
+			const tab = app.__settingTabs[0];
+			tab.display();
+			const field = tab.__setting("Folder-to-author mappings")!.components[0];
+
+			// Half-typed states used to each raise an error and reject the save.
+			await field.__type("Emails=importer:email|primary|^(");
+			await field.__type("Emails=importer:email|primary|^(Notes");
+			await field.__type("Emails=importer:email|primary|^(Notes|Transcript)-");
+			expect(__notices).toEqual([]);
+			expect(plugin.settings.autoImportFolders).toEqual([]);
+
+			await vi.advanceTimersByTimeAsync(1000);
+
+			// Only the final, complete value is validated and saved.
+			expect(__notices).toEqual([]);
+			expect(plugin.settings.autoImportFolders).toEqual([
+				{
+					folder: "Emails",
+					author: "importer:email",
+					contentOrigin: "primary",
+					filenamePattern: "^(Notes|Transcript)-",
+				},
+			]);
+		});
+
+		it("does not lose a mapping edit when the settings tab closes", async () => {
+			// Closing the tab inside the debounce window used to discard the edit
+			// silently — a regression from the previous save-per-keystroke behavior.
+			plugin = await boot(app, { autoImportFolders: [] });
+			const tab = app.__settingTabs[0];
+			tab.display();
+			const field = tab.__setting("Folder-to-author mappings")!.components[0];
+
+			await field.__type("Emails=importer:email|primary");
+			expect(plugin.settings.autoImportFolders).toEqual([]);
+
+			tab.hide();
+			await vi.advanceTimersByTimeAsync(0);
+
+			expect(plugin.settings.autoImportFolders).toEqual([
+				{
+					folder: "Emails",
+					author: "importer:email",
+					contentOrigin: "primary",
+				},
+			]);
+		});
+
+		it("reports an unusable pattern on save without discarding the rest", async () => {
+			plugin = await boot(app, { autoImportFolders: [] });
+			const tab = app.__settingTabs[0];
+			tab.display();
+			const field = tab.__setting("Folder-to-author mappings")!.components[0];
+
+			await field.__type(
+				"Emails=importer:email|primary\nMeetings=importer:x|primary|(a+)+$",
+			);
+			await vi.advanceTimersByTimeAsync(1000);
+
+			expect(__notices.join("\n")).toMatch(/unusable filename pattern/i);
+			// The good mapping survives; one bad line no longer discards everything.
+			expect(plugin.settings.autoImportFolders).toHaveLength(2);
+			expect(plugin.settings.autoImportFolders[0]).toEqual({
+				folder: "Emails",
+				author: "importer:email",
+				contentOrigin: "primary",
+			});
+		});
+
 		it("does not hang vault event handling on a catastrophic pattern", async () => {
 			// The headline claim for #7. Unguarded, this filename against this
 			// pattern takes roughly 80 seconds on the UI thread. The bound is

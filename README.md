@@ -128,6 +128,9 @@ The optional third field is a regular expression matched against the file name, 
 single folder can route different file types to different sources. Files that match no
 mapping are left untouched.
 
+Only the first two `|` separate fields, so a pattern may contain alternations of its
+own — `Meetings=importer:notes|ai-derived|(Notes|Summary)-.*\.md$` works as written.
+
 #### Pattern limits
 
 The match runs on the UI thread while Obsidian is handling a vault event, so a regex

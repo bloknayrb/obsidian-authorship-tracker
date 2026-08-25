@@ -48,13 +48,15 @@ const PROBE_LENGTHS = [12, 18, 24];
 // magnitude above the noise floor.
 const PROBE_BUDGET_MS = 20;
 
-// Filenames are bounded in practice; this only guards against a pathological
-// caller. It is not protection in itself — see the note above.
-const MAX_NAME_LENGTH = 255;
-
-// Compiled patterns, bounded so settings churn cannot grow it without limit.
-// `null` records a pattern that must never be used.
-const compiled = new LRUCache<string, RegExp | null>(64);
+// Verdicts, bounded so settings churn cannot grow the cache without limit.
+// Caching the whole verdict rather than just the compiled regex matters: probing
+// a bad pattern costs hundreds of milliseconds, and it is asked about from three
+// places — load-time validation, the settings commit, and the first match.
+interface Verdict {
+	re: RegExp | null;
+	problem?: PatternProblem;
+}
+const verdicts = new LRUCache<string, Verdict>(64);
 
 // Patterns that blew the budget at match time despite passing validation. Once
 // poisoned, a pattern is treated as a non-match for the rest of the session.
@@ -89,18 +91,104 @@ export function describeProblem(problem: PatternProblem): string {
 
 // Characters to build probe inputs from. A pattern over "x" must be probed with
 // "x"s: probing `(x+x+)+y` with "a"s makes it look instant.
+//
+// The fixed base is always included so that a pattern whose blowup is driven by
+// a character class rather than a literal — `([^x]+)+y`, `^(\d+)+$` — is still
+// exercised.
 function probeAlphabet(pattern: string): string[] {
-	const chars = new Set<string>();
-	// Drop escape sequences first so the letter in `\d` is not read as a literal.
-	const literals = pattern.replace(/\\[dwsSWDbBnrtfv]/g, "");
-	for (const c of literals.match(/[A-Za-z0-9]/g) ?? []) chars.add(c);
-	// Class shorthands imply alphabets of their own.
-	if (/\\d/.test(pattern) || /\[[^\]]*0-9/.test(pattern)) chars.add("0");
-	if (/\\w|\\S|\./.test(pattern) || /a-z/.test(pattern)) chars.add("a");
-	if (/A-Z/.test(pattern)) chars.add("A");
-	if (chars.size === 0) chars.add("a");
-	// A handful is plenty; more only multiplies the check's cost.
+	// Strip escape sequences first, so the letter in `\d` is not read as a
+	// literal "d".
+	const chars = new Set(
+		pattern.replace(/\\[dwsSWDbBnrtfv]/g, "").match(/[A-Za-z0-9]/g) ?? [],
+	);
+	for (const c of ["a", "0", "A"]) chars.add(c);
+	// A handful is plenty; more only multiplies the check's own cost.
 	return [...chars].slice(0, 4);
+}
+
+// Build a string satisfying whatever the pattern anchors at the start of the
+// name, and report where in the pattern that head ends.
+//
+// Without this, an anchored pattern is never actually exercised. Probing
+// `^Email-(a+)+$` with "aaaa..." fails on the first character and returns
+// instantly, so the pattern validates clean and then takes 1.5 seconds on
+// "Email-aaaa...". The same applies to a class head: `^\d{4}-(a+)+$` needs four
+// digits before the vulnerable part is reachable at all. Anchored prefixes are
+// the style the README recommends, so this is the common case.
+//
+// This is a deliberately small generator covering the head only — literals,
+// escaped punctuation, single classes and their bounded repeats. It stops at the
+// first construct it does not model, which is the safe direction: a shorter
+// prefix means a weaker probe, never a wrong verdict.
+function anchoredPrefix(pattern: string): { text: string; end: number } {
+	if (!pattern.startsWith("^")) return { text: "", end: 0 };
+
+	let text = "";
+	let i = 1;
+
+	const readRepeat = (): number => {
+		// A quantifier after an element: emit enough copies to satisfy its minimum.
+		const rest = pattern.slice(i);
+		const brace = /^\{(\d+)(?:,\d*)?\}/.exec(rest);
+		if (brace) {
+			i += brace[0].length;
+			return Math.min(Number(brace[1]), 8);
+		}
+		if (rest[0] === "+") {
+			i += 1;
+			return 1;
+		}
+		if (rest[0] === "*" || rest[0] === "?") {
+			i += 1;
+			return 0;
+		}
+		return 1;
+	};
+
+	while (i < pattern.length) {
+		const c = pattern[i];
+		let unit: string | null = null;
+
+		if (c === "\\") {
+			const next = pattern[i + 1];
+			if (!next) break;
+			i += 2;
+			if (next === "d") unit = "0";
+			else if (next === "w") unit = "a";
+			else if (next === "s") unit = " ";
+			else if (/[^A-Za-z0-9]/.test(next)) unit = next;
+			else break;
+		} else if (c === "[") {
+			const close = pattern.indexOf("]", i + 1);
+			if (close === -1) break;
+			const body = pattern.slice(i + 1, close);
+			// Negated classes are not modelled; stop rather than guess wrong.
+			if (body.startsWith("^")) break;
+			const sample = /0-9|\\d/.test(body)
+				? "0"
+				: /a-z/.test(body)
+					? "a"
+					: /A-Z/.test(body)
+						? "A"
+						: (body.match(/[A-Za-z0-9._-]/) ?? ["a"])[0];
+			i = close + 1;
+			unit = sample;
+		} else if (c === "." ) {
+			i += 1;
+			unit = "a";
+		} else if ("([{*+?|$".includes(c)) {
+			break;
+		} else {
+			i += 1;
+			unit = c;
+		}
+
+		if (unit === null) break;
+		text += unit.repeat(readRepeat());
+		if (text.length > 64) break;
+	}
+
+	return { text, end: i };
 }
 
 // Validate a pattern for use as a filename matcher.
@@ -115,37 +203,68 @@ export function checkPattern(
 	pattern: string,
 	now: () => number = monotonicNow,
 ): PatternCheck {
+	const cached = verdicts.get(pattern);
+	if (cached !== undefined) {
+		return cached.problem === undefined
+			? { ok: true }
+			: { ok: false, problem: cached.problem };
+	}
+	const verdict = probePattern(pattern, now);
+	verdicts.set(pattern, verdict);
+	return verdict.problem === undefined
+		? { ok: true }
+		: { ok: false, problem: verdict.problem };
+}
+
+function probePattern(pattern: string, now: () => number): Verdict {
 	if (pattern.length > MAX_PATTERN_LENGTH) {
-		return { ok: false, problem: "too-long" };
+		return { re: null, problem: "too-long" };
 	}
 
 	let re: RegExp;
 	try {
 		re = new RegExp(pattern);
 	} catch {
-		return { ok: false, problem: "invalid-syntax" };
+		return { re: null, problem: "invalid-syntax" };
 	}
 
-	const alphabet = probeAlphabet(pattern);
+	const prefix = anchoredPrefix(pattern);
+	// Take the alphabet from the part AFTER the anchored prefix. Otherwise a long
+	// prefix crowds out the character that actually drives the blowup: probing
+	// `^Transcript-(x+x+)+y` with T, r, a, n misses "x" entirely.
+	const alphabet = probeAlphabet(pattern.slice(prefix.end));
 	for (const length of PROBE_LENGTHS) {
 		for (const ch of alphabet) {
-			// A trailing space that the pattern is unlikely to accept forces the
-			// backtracking engine to exhaust its alternatives rather than matching
-			// early and returning fast.
-			const subject = ch.repeat(length) + " ";
+			// Satisfy any anchored literal prefix, then repeat a character to drive
+			// the backtracking. The trailing space is one the pattern is unlikely to
+			// accept, forcing the engine to exhaust its alternatives rather than
+			// matching early and returning fast.
+			const subject = prefix.text + ch.repeat(length) + " ";
 			const started = now();
 			try {
 				re.test(subject);
 			} catch {
 				// A pattern that throws mid-match is unusable.
-				return { ok: false, problem: "invalid-syntax" };
+				return { re: null, problem: "invalid-syntax" };
 			}
 			if (now() - started > PROBE_BUDGET_MS) {
-				return { ok: false, problem: "too-slow" };
+				// One sample can be inflated by a GC pause, and a false "too-slow"
+				// silently disables a working mapping for the session. Re-measure
+				// before concluding. A genuinely exponential pattern is just as slow
+				// the second time; a hiccup is not.
+				const confirm = now();
+				try {
+					re.test(subject);
+				} catch {
+					return { re: null, problem: "invalid-syntax" };
+				}
+				if (now() - confirm > PROBE_BUDGET_MS) {
+					return { re: null, problem: "too-slow" };
+				}
 			}
 		}
 	}
-	return { ok: true };
+	return { re };
 }
 
 // Match a filename, refusing to use any pattern that fails validation.
@@ -165,26 +284,27 @@ export function matchesPattern(
 ): boolean {
 	if (poisoned.has(pattern)) return false;
 
-	let re = compiled.get(pattern);
-	if (re === undefined) {
-		re = checkPattern(pattern, now).ok ? new RegExp(pattern) : null;
-		compiled.set(pattern, re);
+	let verdict = verdicts.get(pattern);
+	if (verdict === undefined) {
+		verdict = probePattern(pattern, now);
+		verdicts.set(pattern, verdict);
 	}
-	if (re === null) return false;
+	if (verdict.re === null) return false;
+	const re = verdict.re;
 
-	const subject =
-		name.length > MAX_NAME_LENGTH ? name.slice(0, MAX_NAME_LENGTH) : name;
-
+	// The name is NOT truncated. An earlier revision capped it at 255 characters,
+	// but by this module's own reasoning that buys no safety — the blowup fits in
+	// an ordinary filename — while truncation silently changes what `$` matches.
 	const started = now();
 	let result: boolean;
 	try {
-		result = re.test(subject);
+		result = re.test(name);
 	} catch {
-		poisoned.add(pattern);
+		poison(pattern);
 		return false;
 	}
 	if (now() - started > PROBE_BUDGET_MS) {
-		poisoned.add(pattern);
+		poison(pattern);
 		return false;
 	}
 	return result;
@@ -195,8 +315,25 @@ export function isPoisoned(pattern: string): boolean {
 	return poisoned.has(pattern);
 }
 
+// Notified once per pattern when one is disabled at match time. Poisoning stops
+// a mapping attributing anything for the rest of the session, which must not
+// happen silently — that is the failure mode load-time validation exists to
+// prevent, arriving by a different route.
+let onPoisoned: ((pattern: string) => void) | undefined;
+
+export function setPoisonListener(fn: (pattern: string) => void): void {
+	onPoisoned = fn;
+}
+
+function poison(pattern: string): void {
+	if (poisoned.has(pattern)) return;
+	poisoned.add(pattern);
+	onPoisoned?.(pattern);
+}
+
 // Test hook: module-level caches would otherwise leak between test cases.
 export function __resetPatternState(): void {
-	compiled.clear();
+	verdicts.clear();
 	poisoned.clear();
+	onPoisoned = undefined;
 }

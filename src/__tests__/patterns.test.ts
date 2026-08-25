@@ -12,6 +12,15 @@ import {
 // measured taking seconds to minutes on a ~30-character filename.
 const CATASTROPHIC = [
 	"(a+)+$",
+	// Anchored forms. These are the important ones: a probe built from
+	// homogeneous strings never satisfies the anchor, so the pattern fails
+	// instantly on the probe and validates clean while still hanging on a real
+	// filename. `^Email-(a+)+$` measured 1530ms on a 35-character name.
+	"^Email-(a+)+$",
+	"^Transcript-(x+x+)+y",
+	"^\\d{4}-(a+)+$",
+	"^Notes/(a|a)*$",
+	"^[A-Z]{2}-(a+)+$",
 	"(a|a)*$",
 	"([a-z]|[a-c])*$",
 	"(x+x+)+y",
@@ -24,6 +33,9 @@ const CATASTROPHIC = [
 // Realistic filename patterns, including the two the README documents.
 const BENIGN = [
 	"^Transcript-",
+	"^Meeting-\\d{4}-\\d{2}\\.md$",
+	"^[A-Z]{2}-\\d+\\.md$",
+	"^archive/\\d{4}/.*\\.md$",
 	"^Notes-",
 	"\\.pdf$",
 	"^(?:[A-Za-z0-9_-]+\\s)+meeting\\.md$",
@@ -86,6 +98,16 @@ describe("checkPattern", () => {
 		expect(checkPattern("[(+]").ok).toBe(true);
 	});
 
+	it("satisfies an anchored head so the rest of the pattern is reachable", () => {
+		// Literal prefix, class prefix, and a bounded repeat of a class.
+		expect(checkPattern("^Email-(a+)+$").problem).toBe("too-slow");
+		expect(checkPattern("^\\d{4}-(a+)+$").problem).toBe("too-slow");
+		expect(checkPattern("^[A-Z]{2}-(a+)+$").problem).toBe("too-slow");
+		// And the alphabet comes from AFTER the prefix, so a long literal head
+		// cannot crowd out the character driving the blowup.
+		expect(checkPattern("^Transcript-(x+x+)+y").problem).toBe("too-slow");
+	});
+
 	it("probes using the pattern's own alphabet", () => {
 		// Probing (x+x+)+y with "a"s makes it look instant, because the pattern
 		// fails on the first character. The alphabet has to come from the pattern.
@@ -95,15 +117,30 @@ describe("checkPattern", () => {
 		expect(checkPattern("^(\\d+)+$").problem).toBe("too-slow");
 	});
 
-	it("bounds its own cost with an injected clock", () => {
-		// A clock that jumps past the budget on its second reading forces the
-		// early bail without needing a genuinely slow pattern.
-		let calls = 0;
-		const now = () => (calls++ === 0 ? 0 : 10_000);
+	it("rejects when a slow measurement is confirmed", () => {
+		// A clock that always reports the budget as blown: both the first
+		// measurement and the confirming one.
+		let t = 0;
+		const now = () => (t += 10_000);
 		expect(checkPattern("^Transcript-", now)).toEqual({
 			ok: false,
 			problem: "too-slow",
 		});
+	});
+
+	it("does not reject on a single spike that does not reproduce", () => {
+		// A GC pause during one probe must not disable a working pattern for the
+		// session. Only the first reading pair is slow here; the confirming
+		// measurement comes back fast, so the pattern stands.
+		let reading = 0;
+		const now = () => {
+			reading++;
+			// Readings 1 and 2 straddle a 10s "pause"; everything after is instant.
+			if (reading === 1) return 0;
+			if (reading === 2) return 10_000;
+			return 10_000;
+		};
+		expect(checkPattern("^Transcript-", now)).toEqual({ ok: true });
 	});
 });
 
@@ -123,12 +160,11 @@ describe("matchesPattern", () => {
 		);
 	});
 
-	it("caps the length of the name it matches against", () => {
-		// 10k characters would be a pathological caller, not a real filename.
-		const huge = "a".repeat(10_000) + "b";
-		expect(() => matchesPattern("^a+b$", huge)).not.toThrow();
-		// Truncated, so the trailing "b" is gone and it no longer matches.
-		expect(matchesPattern("^a+b$", huge)).toBe(false);
+	it("matches the whole name rather than a truncated prefix", () => {
+		// Truncating would silently change what `$` means. A long name is fine:
+		// this pattern is linear, so length costs nothing.
+		const long = "a".repeat(10_000) + "b";
+		expect(matchesPattern("^a+b$", long)).toBe(true);
 	});
 
 	it("poisons a pattern that blows the budget at match time", () => {
