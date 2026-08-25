@@ -392,6 +392,104 @@ describe("AuthorshipTrackerPlugin", () => {
 		});
 	});
 
+	// ── Unusable filename patterns ────────────────────────────────────────────
+
+	describe("unusable filename patterns", () => {
+		it("warns at load about a stored pattern that cannot be used", async () => {
+			// A stored pattern never passes back through the settings tab, so
+			// without this the mapping would just stop attributing anything with no
+			// indication why.
+			plugin = await boot(app, {
+				autoImportFolders: [
+					{
+						folder: "Emails",
+						author: "importer:email",
+						contentOrigin: "primary",
+						filenamePattern: "(a+)+$",
+					},
+				],
+			});
+
+			expect(__notices.join("\n")).toMatch(/unusable filename pattern/i);
+			expect(__notices.join("\n")).toContain("(a+)+$");
+		});
+
+		it("says nothing at load when every pattern is fine", async () => {
+			plugin = await boot(app, {
+				autoImportFolders: [
+					{
+						folder: "Emails",
+						author: "importer:email",
+						contentOrigin: "primary",
+						filenamePattern: "^Transcript-",
+					},
+				],
+			});
+
+			expect(__notices).toEqual([]);
+		});
+
+		it("does not hang vault event handling on a catastrophic pattern", async () => {
+			// The headline claim for #7. Unguarded, this filename against this
+			// pattern takes roughly 80 seconds on the UI thread. The bound is
+			// deliberately loose — wall-clock assertions are flaky on shared CI, and
+			// the failure being caught here is four orders of magnitude, not four
+			// hundred milliseconds.
+			plugin = await boot(app, {
+				autoImportFolders: [
+					{
+						folder: "Emails",
+						author: "importer:email",
+						contentOrigin: "primary",
+						filenamePattern: "(a+)+$",
+					},
+				],
+			});
+			app.vault.__seedFolder("Emails");
+
+			const evil = "a".repeat(32) + "!.md";
+			const started = performance.now();
+			await app.vault.create(`Emails/${evil}`, "# hi\n");
+			await vi.advanceTimersByTimeAsync(AUTO_IMPORT_STAMP_DELAY_MS);
+			const elapsed = performance.now() - started;
+
+			expect(elapsed).toBeLessThan(5000);
+			expect(readFrontMatter(app, `Emails/${evil}`)).toEqual({});
+		});
+
+		it("fails closed: a mapping with an unusable pattern matches nothing", async () => {
+			// Critically it must not fall back to matching EVERY file in the folder,
+			// which would turn a bad pattern into mass mis-attribution.
+			plugin = await boot(app, {
+				autoImportFolders: [
+					{
+						folder: "Emails",
+						author: "importer:email",
+						contentOrigin: "primary",
+						filenamePattern: "(a+)+$",
+					},
+					{
+						folder: "Meetings",
+						author: "importer:transcript",
+						contentOrigin: "primary",
+					},
+				],
+			});
+			app.vault.__seedFolder("Emails");
+			app.vault.__seedFolder("Meetings");
+
+			await app.vault.create("Emails/msg.md", "# hi\n");
+			await app.vault.create("Meetings/note.md", "# hi\n");
+			await vi.advanceTimersByTimeAsync(AUTO_IMPORT_STAMP_DELAY_MS);
+
+			expect(readFrontMatter(app, "Emails/msg.md")).toEqual({});
+			// Positive control: the unaffected mapping still works.
+			expect(readFrontMatter(app, "Meetings/note.md").created_by).toBe(
+				"importer:transcript",
+			);
+		});
+	});
+
 	// ── Retention (current behavior) ──────────────────────────────────────────
 
 	describe("log retention", () => {

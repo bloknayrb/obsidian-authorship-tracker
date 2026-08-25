@@ -3,7 +3,7 @@ import {
 	getAutoImportResult,
 	parseMappings,
 	serializeMappings,
-	invalidPatterns,
+	patternProblems,
 	AutoImportMapping,
 } from "../mappings";
 
@@ -79,12 +79,36 @@ describe("parse/serialize round-trip", () => {
 	});
 });
 
-describe("invalidPatterns", () => {
-	it("flags only unparseable regexes", () => {
+describe("patternProblems", () => {
+	it("reports unparseable regexes with a reason", () => {
 		const list: AutoImportMapping[] = [
 			{ folder: "A", author: "a", contentOrigin: "primary", filenamePattern: "^ok$" },
 			{ folder: "B", author: "b", contentOrigin: "primary", filenamePattern: "(" },
 		];
-		expect(invalidPatterns(list)).toEqual(["("]);
+		expect(patternProblems(list)).toEqual([
+			{ pattern: "(", problem: "invalid-syntax" },
+		]);
+	});
+
+	it("reports patterns that would freeze the UI", () => {
+		const list: AutoImportMapping[] = [
+			{ folder: "A", author: "a", contentOrigin: "primary", filenamePattern: "(a+)+$" },
+		];
+		expect(patternProblems(list)).toEqual([
+			{ pattern: "(a+)+$", problem: "too-slow" },
+		]);
+	});
+
+	it("says nothing about mappings with no pattern, or with good ones", () => {
+		const list: AutoImportMapping[] = [
+			{ folder: "A", author: "a", contentOrigin: "primary" },
+			{
+				folder: "B",
+				author: "b",
+				contentOrigin: "primary",
+				filenamePattern: "^Transcript-",
+			},
+		];
+		expect(patternProblems(list)).toEqual([]);
 	});
 });

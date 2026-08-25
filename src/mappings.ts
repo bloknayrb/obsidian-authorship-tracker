@@ -16,13 +16,20 @@ export interface AutoImportResult {
 	contentOrigin: string;
 }
 
+import {
+	type PatternProblem,
+	checkPattern,
+	matchesPattern,
+} from "./patterns";
+
 function trimSlashes(value: string): string {
 	return value.replace(/^\/+|\/+$/g, "");
 }
 
 // Resolve the author/content-origin for a file path against the mappings, or
-// null if no mapping applies. An invalid `filenamePattern` is treated as a
-// non-match rather than throwing, so a bad setting can never break vault events.
+// null if no mapping applies. A `filenamePattern` that is invalid or unsafe is
+// treated as a non-match rather than throwing, so a bad setting can never break
+// vault events. Callers surface the problem to the user separately.
 export function getAutoImportResult(
 	mappings: AutoImportMapping[],
 	path: string,
@@ -32,14 +39,11 @@ export function getAutoImportResult(
 		const folder = trimSlashes(mapping.folder);
 		if (!folder) continue;
 		if (!path.startsWith(folder + "/")) continue;
-		if (mapping.filenamePattern) {
-			let pattern: RegExp;
-			try {
-				pattern = new RegExp(mapping.filenamePattern);
-			} catch {
-				continue;
-			}
-			if (!pattern.test(name)) continue;
+		if (
+			mapping.filenamePattern &&
+			!matchesPattern(mapping.filenamePattern, name)
+		) {
+			continue;
 		}
 		return {
 			author: mapping.author,
@@ -89,16 +93,23 @@ export function serializeMappings(mappings: AutoImportMapping[]): string {
 		.join("\n");
 }
 
-// Return the list of invalid filename-pattern regexes (for settings validation).
-export function invalidPatterns(mappings: AutoImportMapping[]): string[] {
-	const invalid: string[] = [];
+export interface PatternIssue {
+	pattern: string;
+	problem: PatternProblem;
+}
+
+// Filename patterns that cannot be used, with the reason for each — so the
+// settings error can say WHY rather than just listing them.
+export function patternProblems(
+	mappings: AutoImportMapping[],
+): PatternIssue[] {
+	const issues: PatternIssue[] = [];
 	for (const m of mappings) {
 		if (!m.filenamePattern) continue;
-		try {
-			new RegExp(m.filenamePattern);
-		} catch {
-			invalid.push(m.filenamePattern);
+		const result = checkPattern(m.filenamePattern);
+		if (!result.ok && result.problem) {
+			issues.push({ pattern: m.filenamePattern, problem: result.problem });
 		}
 	}
-	return invalid;
+	return issues;
 }

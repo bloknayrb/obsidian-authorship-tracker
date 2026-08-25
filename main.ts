@@ -19,8 +19,9 @@ import {
 	getAutoImportResult,
 	parseMappings,
 	serializeMappings,
-	invalidPatterns,
+	patternProblems,
 } from "./src/mappings";
+import { describeProblem } from "./src/patterns";
 import { shouldIgnoreFile } from "./src/paths";
 import { isLogExpired } from "./src/retention";
 import { formatLocalTimestamp, localDateString } from "./src/time";
@@ -34,6 +35,10 @@ export const AUTO_IMPORT_STAMP_DELAY_MS = 3000;
 const FALLBACK_AUTHOR = "me";
 // Minimum interval between user-facing error notices, to avoid spamming.
 const NOTICE_THROTTLE_MS = 60000;
+// How long to wait after the last keystroke in the mappings textarea before
+// validating and saving. Validation probes each pattern for catastrophic
+// backtracking, which is far too costly to run per keystroke.
+const MAPPINGS_VALIDATE_DELAY_MS = 600;
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
@@ -100,6 +105,7 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 
 	async onload() {
 		await this.loadSettings();
+		this.warnAboutUnusablePatterns();
 		this._contentCache = new LRUCache<string, string>(
 			this.settings.maxCacheSize,
 		);
@@ -269,6 +275,26 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 			clearTimeout(timer);
 		}
 		this._autoImportTimers.clear();
+	}
+
+	// A stored filename pattern never passes back through the settings tab, so a
+	// pattern that cannot be used would otherwise fail silently — auto-imported
+	// notes would just stop being attributed, with no indication why. In a
+	// provenance plugin that is the worst possible failure mode, so say it out
+	// loud once at load.
+	private warnAboutUnusablePatterns(): void {
+		const issues = patternProblems(this.settings.autoImportFolders);
+		if (issues.length === 0) return;
+
+		const detail = issues
+			.map((i) => `"${i.pattern}" (${describeProblem(i.problem)})`)
+			.join("; ");
+		console.error(
+			`[authorship-tracker] Ignoring unusable filename pattern(s): ${detail}`,
+		);
+		new Notice(
+			`Authorship Tracker: ignoring unusable filename pattern(s): ${detail}. Auto-import for those folders is disabled until they are fixed.`,
+		);
 	}
 
 	private authorName(): string {
@@ -543,10 +569,37 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 
 class AuthorshipTrackerSettingTab extends PluginSettingTab {
 	plugin: AuthorshipTrackerPlugin;
+	private _mappingsDebounce: ReturnType<typeof setTimeout> | null = null;
 
 	constructor(app: App, plugin: AuthorshipTrackerPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
+	}
+
+	// Save what the user typed, and report any pattern that cannot be used.
+	//
+	// Two deliberate choices here. First, the whole textarea is saved rather than
+	// rejected: previously a single bad pattern discarded every other mapping the
+	// user had just typed. Second, an unusable pattern is kept verbatim rather
+	// than stripped — getAutoImportResult treats it as a non-match, so the
+	// mapping simply never fires. Stripping it would leave a bare
+	// `Folder=Author|Origin` rule that matches EVERY file in that folder, turning
+	// a bad pattern into mass mis-attribution.
+	private async commitMappings(value: string): Promise<void> {
+		const mappings = parseMappings(value);
+		const issues = patternProblems(mappings);
+
+		if (issues.length > 0) {
+			const detail = issues
+				.map((i) => `"${i.pattern}" (${describeProblem(i.problem)})`)
+				.join("; ");
+			new Notice(
+				`Authorship Tracker: unusable filename pattern(s): ${detail}. Those mappings will not match anything until fixed.`,
+			);
+		}
+
+		this.plugin.settings.autoImportFolders = mappings;
+		await this.plugin.saveSettings();
 	}
 
 	display(): void {
@@ -704,19 +757,17 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 							this.plugin.settings.autoImportFolders,
 						),
 					)
-					.onChange(async (value) => {
-						const mappings = parseMappings(value);
-						const bad = invalidPatterns(mappings);
-						if (bad.length > 0) {
-							new Notice(
-								`Authorship Tracker: invalid filename pattern(s): ${bad.join(
-									", ",
-								)}`,
-							);
-							return;
+					.onChange((value) => {
+						// Validation runs the pattern against adversarial probe
+						// inputs, which costs real time on a pathological one, so it
+						// must not run on every keystroke — and a half-typed pattern
+						// like "^(" is not an error worth shouting about yet.
+						if (this._mappingsDebounce) {
+							clearTimeout(this._mappingsDebounce);
 						}
-						this.plugin.settings.autoImportFolders = mappings;
-						await this.plugin.saveSettings();
+						this._mappingsDebounce = setTimeout(() => {
+							void this.commitMappings(value);
+						}, MAPPINGS_VALIDATE_DELAY_MS);
 					});
 			});
 	}
