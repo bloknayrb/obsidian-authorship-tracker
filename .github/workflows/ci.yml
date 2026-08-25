@@ -24,8 +24,8 @@ jobs:
       # (against the mock), and run the suite. Defined in package.json so CI and
       # contributors run an identical gate with one command.
       #
-      # release.yml does NOT run this yet -- a tag can still publish without any
-      # of these checks. That is issue #5, stacked behind this PR.
+      # release.yml runs the same script before publishing, so a tag cannot ship
+      # something CI would have rejected.
       - name: Verify
         run: npm run verify
 

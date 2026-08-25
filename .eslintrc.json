@@ -22,6 +22,40 @@
     "version-bump.mjs"
   ],
   "rules": {
+    "no-restricted-globals": [
+      "error",
+      { "name": "fetch", "message": "No network requests - see README > Privacy." },
+      { "name": "XMLHttpRequest", "message": "No network requests - see README > Privacy." },
+      { "name": "WebSocket", "message": "No network requests - see README > Privacy." },
+      { "name": "EventSource", "message": "No network requests - see README > Privacy." }
+    ],
+    "no-restricted-properties": [
+      "error",
+      { "object": "window", "property": "fetch", "message": "No network requests - see README > Privacy." },
+      { "object": "globalThis", "property": "fetch", "message": "No network requests - see README > Privacy." },
+      { "object": "self", "property": "fetch", "message": "No network requests - see README > Privacy." },
+      { "object": "window", "property": "XMLHttpRequest", "message": "No network requests - see README > Privacy." },
+      { "object": "globalThis", "property": "XMLHttpRequest", "message": "No network requests - see README > Privacy." },
+      { "object": "navigator", "property": "sendBeacon", "message": "No network requests - see README > Privacy." }
+    ],
+    "no-restricted-imports": [
+      "error",
+      {
+        "patterns": [
+          {
+            "group": ["http", "https", "node:http", "node:https"],
+            "message": "No network requests - see README > Privacy."
+          }
+        ],
+        "paths": [
+          {
+            "name": "obsidian",
+            "importNames": ["requestUrl", "request"],
+            "message": "No network requests - see README > Privacy."
+          }
+        ]
+      }
+    ],
     "no-undef": "off",
     "no-unused-vars": "off",
     "@typescript-eslint/no-unused-vars": [

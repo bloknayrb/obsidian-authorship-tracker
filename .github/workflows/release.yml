@@ -18,9 +18,23 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
 
       - name: Install dependencies
         run: npm ci
+
+      # Obsidian requires the release tag to equal manifest.json's version
+      # exactly, and its updater reads minAppVersion out of versions.json. A
+      # mismatch produces a release users cannot install, so this runs before
+      # anything is built or published. Runnable locally before pushing a tag.
+      - name: Verify tag matches manifest and package versions
+        run: node scripts/check-release-version.mjs "${{ github.ref_name }}"
+
+      # The same gate CI runs: lint, typecheck against the real Obsidian API,
+      # typecheck the tests against the mock, and run the suite. Steps are
+      # fail-fast, so a failure here means the release below never happens.
+      - name: Verify
+        run: npm run verify
 
       - name: Build plugin
         run: node esbuild.config.mjs production
@@ -33,4 +47,5 @@ jobs:
           gh release create "$tag" \
             --title="$tag" \
             --notes="Release $tag" \
+            --verify-tag \
             main.js manifest.json styles.css

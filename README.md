@@ -56,6 +56,32 @@ every existing file when it first loads.
 When you type in a note that has no `created_by` field yet, the plugin records you as the
 creator — but only when you actually edit it, not merely because the file exists.
 
+## Privacy
+
+Authorship Tracker runs entirely inside your vault:
+
+- **No network requests.** The plugin never contacts a server. Lint rules keep it that
+  way rather than leaving it to review: `fetch` (bare, and via `window`/`globalThis`/
+  `self`), `XMLHttpRequest`, `WebSocket`, `EventSource`, `navigator.sendBeacon`, the node
+  `http`/`https` modules, and Obsidian's own `requestUrl`/`request` are all errors. That
+  is a guard against accidental reintroduction, not a sandbox — it catches the ways a
+  request would realistically be written, not every conceivable one.
+- **No telemetry or analytics.** Nothing about your usage is collected or transmitted.
+- **No third-party code.** `package.json` has no runtime dependencies at all, and the
+  published `main.js` contains exactly one external reference: `require("obsidian")`.
+
+Everything it writes stays inside your vault and is readable in a text editor:
+[frontmatter](#the-fields-it-writes) on the notes you edit, and a
+[daily JSONL log](#the-daily-log).
+
+Worth stating plainly, because "no telemetry" alone would be misleading: **the log
+describes your notes.** Its entries contain note paths and short summaries that include
+`## ` heading text from the notes you edited. It travels wherever your vault travels — if
+you sync, the logs sync. Put the log folder in an ignored path, or set retention, if that
+matters to you.
+
+One thing outside this plugin's control: Obsidian itself checks for plugin updates.
+
 ## The fields it writes
 
 | Field | Meaning |
@@ -233,6 +259,46 @@ npm run build    # typecheck + production build
 
 The pure logic (diffing, the LRU cache, folder matching, mapping parsing, time
 formatting) lives in `src/` and is unit tested with [Vitest](https://vitest.dev/).
+
+### Releasing
+
+```bash
+npm version <x.y.z>   # runs version-bump.mjs, stages manifest.json + versions.json
+git push && git push --tags
+```
+
+Pushing the tag runs `.github/workflows/release.yml`, which refuses to publish unless:
+
+- the tag equals `manifest.json`'s version **exactly**, with no `v` prefix — Obsidian's
+  plugin updater requires this, and `.npmrc` clears npm's default `v` so `npm version`
+  produces the right tag
+- `package.json`'s version matches too
+- `versions.json` maps that version to the manifest's `minAppVersion`
+- `npm run verify` passes (lint, both typechecks, the full suite)
+
+Steps are fail-fast, so any failure means no GitHub Release is created.
+
+Edit `manifest.json`'s version by hand and the `versions.json` check will catch it — use
+`npm version` so `version-bump.mjs` keeps the two in step.
+
+### Pre-release smoke tests
+
+Most behaviour is already covered by `npm test` against a mocked Obsidian API — edits,
+debouncing, ignore rules, focus changes, auto-import, logging, retention, and unload are
+all asserted there, so re-checking them by hand is busywork that makes the whole list
+easy to skip.
+
+These are the ones a mock cannot prove. Run them against a scratch vault with the built
+`main.js` installed.
+
+| Scenario | Why a mock can't cover it | Expected |
+|---|---|---|
+| Clean vault | Real plugin load against a real Obsidian build | Enables with no console errors; no files created until the first tracked edit |
+| External writers | Requires a real write from outside Obsidian | Modify a note via another editor, the CLI, or sync → **no** frontmatter change and **no** log line |
+| Bad filename pattern | The freeze is a real-UI symptom; tests assert the validator, not the app | Paste `(a+)+$` as a pattern and click away → a notice names the pattern and the reason, Obsidian stays responsive, other mappings keep working |
+| Retention across a restart | Pruning runs at load, so it needs a genuine restart | Set retention to 1, restart Obsidian → today's and yesterday's logs survive, older ones are gone, non-log files untouched |
+| Mobile | No mobile runtime in CI | Install on iOS or Android → plugin loads (`isDesktopOnly: false`), edits stamp, logs write |
+| Vault sync | Sync behaviour is outside the plugin entirely | With sync enabled, confirm the log folder syncs as expected — or is excluded, if you configured that |
 
 ## License
 
