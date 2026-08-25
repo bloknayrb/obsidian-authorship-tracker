@@ -13,9 +13,13 @@
 //   * `vault.create` rejects when the parent folder is missing, which is what drives
 //     the createFolder branch in appendLog.
 //
-// Deliberate gap: processFrontMatter here is a scalar-only YAML shim. Tests must
-// assert through `readFrontMatter()` rather than against raw file text, so they are
-// not coupled to this fake's serializer.
+// Deliberate gap: processFrontMatter here is a scalar-only YAML shim. Tests assert
+// through `readFrontMatter()` in test/helpers.ts rather than against raw file text,
+// so they are not coupled to this fake's serializer.
+//
+// Naming rule: anything NOT present in obsidian.d.ts is prefixed `__`. That keeps
+// the emulated surface legible, and `npm run typecheck` (which compiles main.ts
+// against the REAL .d.ts) fails if production code ever reaches for one of them.
 
 // ─── Events ───────────────────────────────────────────────────────────────────
 
@@ -38,17 +42,9 @@ class Events {
 		return { off: () => set!.delete(cb) };
 	}
 
-	off(name: string, cb: Handler): void {
-		this._handlers.get(name)?.delete(cb);
-	}
-
-	// Test hook: fire an event exactly as Obsidian would.
+	// Real Obsidian API, not a test-only affordance.
 	trigger(name: string, ...args: unknown[]): void {
 		for (const cb of [...(this._handlers.get(name) ?? [])]) cb(...args);
-	}
-
-	__handlerCount(name: string): number {
-		return this._handlers.get(name)?.size ?? 0;
 	}
 }
 
@@ -82,47 +78,38 @@ function splitExtension(name: string): { basename: string; extension: string } {
 export abstract class TAbstractFile {
 	vault!: Vault;
 	path = "";
-	name = "";
 	parent: TFolder | null = null;
+
+	constructor(path?: string) {
+		if (path !== undefined) this.path = normalizePath(path);
+	}
+
+	get name(): string {
+		return basename(this.path);
+	}
 }
 
 export class TFile extends TAbstractFile {
-	basename = "";
-	extension = "";
+	// Present because the real TFile has it (see test/mock-conformance.ts); the
+	// plugin never reads it.
 	stat = { ctime: 0, mtime: 0, size: 0 };
 
-	// Derive name/basename/extension from the path. main.ts gates auto-import on
-	// `file.extension !== "md"` (main.ts:148) and reads `file.name` (main.ts:154),
-	// so a TFile with an undefined extension would short-circuit those paths and
-	// make the tests pass vacuously.
-	constructor(path?: string) {
-		super();
-		if (path !== undefined) this.__setPath(path);
+	// Derived rather than stored, so they can never fall out of sync with `path`
+	// across a rename. main.ts gates auto-import on `file.extension !== "md"`
+	// (main.ts:148) and reads `file.name` (main.ts:154), so a TFile that failed to
+	// derive these would short-circuit those paths and pass tests vacuously.
+	get basename(): string {
+		return splitExtension(this.name).basename;
 	}
 
-	__setPath(path: string): void {
-		this.path = normalizePath(path);
-		this.name = basename(this.path);
-		const { basename: b, extension: e } = splitExtension(this.name);
-		this.basename = b;
-		this.extension = e;
+	get extension(): string {
+		return splitExtension(this.name).extension;
 	}
 }
 
 export class TFolder extends TAbstractFile {
 	children: TAbstractFile[] = [];
 
-	constructor(path?: string) {
-		super();
-		if (path !== undefined) {
-			this.path = normalizePath(path);
-			this.name = basename(this.path);
-		}
-	}
-
-	isRoot(): boolean {
-		return this.path === "";
-	}
 }
 
 // ─── Vault ────────────────────────────────────────────────────────────────────
@@ -139,18 +126,8 @@ export class Vault extends Events {
 		this._files.set("", this._root);
 	}
 
-	getRoot(): TFolder {
-		return this._root;
-	}
-
 	getAbstractFileByPath(path: string): TAbstractFile | null {
 		return this._files.get(normalizePath(path)) ?? null;
-	}
-
-	getFiles(): TFile[] {
-		return [...this._files.values()].filter(
-			(f): f is TFile => f instanceof TFile,
-		);
 	}
 
 	async read(file: TFile): Promise<string> {
@@ -159,10 +136,6 @@ export class Vault extends Events {
 			throw new Error(`ENOENT: ${file.path}`);
 		}
 		return data;
-	}
-
-	async cachedRead(file: TFile): Promise<string> {
-		return this.read(file);
 	}
 
 	async create(path: string, data: string): Promise<TFile> {
@@ -230,10 +203,6 @@ export class Vault extends Events {
 		this.trigger("delete", file);
 	}
 
-	async trash(file: TAbstractFile): Promise<void> {
-		return this.delete(file);
-	}
-
 	async rename(file: TAbstractFile, newPath: string): Promise<void> {
 		const oldPath = file.path;
 		const p = normalizePath(newPath);
@@ -243,11 +212,8 @@ export class Vault extends Events {
 		if (data !== undefined) this._content.set(p, data);
 
 		// Mutate in place: Obsidian keeps the same TFile instance across a rename.
-		if (file instanceof TFile) file.__setPath(p);
-		else {
-			file.path = p;
-			file.name = basename(p);
-		}
+		// `name`/`basename`/`extension` are getters over `path`, so they follow.
+		file.path = p;
 		this._files.set(p, file);
 
 		const oldParent = file.parent;
@@ -377,10 +343,6 @@ export class FileManager {
 		fn(fm);
 		await this.vault.modify(file, serializeFrontMatter(fm) + body);
 	}
-
-	async trashFile(file: TAbstractFile): Promise<void> {
-		await this.vault.delete(file);
-	}
 }
 
 // ─── Editor / views ───────────────────────────────────────────────────────────
@@ -399,16 +361,11 @@ export interface MarkdownFileInfo {
 	file: TFile | null;
 }
 
-export class View {
-	constructor(public app: App) {}
-}
-
-export class MarkdownView extends View {
+export class MarkdownView {
 	file: TFile | null = null;
 	editor: Editor;
 
-	constructor(app: App, file: TFile | null = null, content = "") {
-		super(app);
+	constructor(public app: App, file: TFile | null = null, content = "") {
 		this.file = file;
 		this.editor = new Editor(content);
 	}
@@ -420,9 +377,6 @@ export class WorkspaceLeaf {
 	async openFile(file: TFile): Promise<void> {
 		const view = new MarkdownView(this.app, file);
 		this.view = view;
-	}
-	getViewState() {
-		return { type: this.view instanceof MarkdownView ? "markdown" : "empty" };
 	}
 }
 
@@ -458,11 +412,6 @@ export class Workspace extends Events {
 		return view instanceof type ? (view as T) : null;
 	}
 
-	getLeavesOfType(viewType: string): WorkspaceLeaf[] {
-		if (viewType !== "markdown") return [];
-		return this._leaves.filter((l) => l.view instanceof MarkdownView);
-	}
-
 	getLeaf(_newLeaf?: boolean): WorkspaceLeaf {
 		if (!this.activeLeaf) {
 			const leaf = new WorkspaceLeaf(this.app);
@@ -483,15 +432,6 @@ export class Workspace extends Events {
 		this._leaves.push(leaf);
 		if (makeActive) this.activeLeaf = leaf;
 		return view;
-	}
-
-	__setActive(view: MarkdownView): void {
-		const leaf = this._leaves.find((l) => l.view === view);
-		if (leaf) this.activeLeaf = leaf;
-	}
-
-	__leafCount(): number {
-		return this._leaves.length;
 	}
 }
 
@@ -523,11 +463,8 @@ export function __resetNotices(): void {
 }
 
 export class Notice {
-	constructor(public message: string, public timeout?: number) {
+	constructor(public message: string) {
 		__notices.push(message);
-	}
-	hide(): void {
-		/* no-op */
 	}
 }
 
@@ -549,21 +486,11 @@ export interface PluginManifest {
 	description?: string;
 }
 
-export class Component {
+export class Plugin {
+	constructor(public app: App, public manifest: PluginManifest) {}
+
 	registerEvent(_ref: EventRef): void {
-		/* refs collected by Plugin */
-	}
-}
-
-export class Plugin extends Component {
-	private _eventRefs: EventRef[] = [];
-
-	constructor(public app: App, public manifest: PluginManifest) {
-		super();
-	}
-
-	registerEvent(ref: EventRef): void {
-		this._eventRefs.push(ref);
+		/* Obsidian detaches these on unload; nothing here depends on that. */
 	}
 
 	addCommand(cmd: Command): Command {
@@ -592,12 +519,6 @@ export class Plugin extends Component {
 
 	onunload(): void {
 		/* overridden */
-	}
-
-	// Test helper: detach every registered event, as Obsidian does on unload.
-	__offAll(): void {
-		for (const ref of this._eventRefs) ref.off();
-		this._eventRefs = [];
 	}
 }
 
@@ -628,10 +549,6 @@ export class FakeEl {
 		return el;
 	}
 
-	createDiv(cls?: string): FakeEl {
-		return this.createEl("div", { cls });
-	}
-
 	setText(text: string): void {
 		this.text = text;
 	}
@@ -652,10 +569,6 @@ class ValueComponent<T> {
 		return this;
 	}
 
-	getValue(): T {
-		return this.value;
-	}
-
 	setPlaceholder(_p: string): this {
 		return this;
 	}
@@ -664,64 +577,36 @@ class ValueComponent<T> {
 		this._onChange = cb;
 		return this;
 	}
-
-	// Test helper: simulate the user typing `value`, awaiting the async handler.
-	async __type(value: T): Promise<void> {
-		this.value = value;
-		this.inputEl.value = String(value);
-		await this._onChange?.(value);
-	}
 }
 
 export class TextComponent extends ValueComponent<string> {}
 export class TextAreaComponent extends ValueComponent<string> {}
-export class ToggleComponent extends ValueComponent<boolean> {}
 
+// The settings tab is not exercised by the current suite. This inert skeleton
+// exists so main.ts's display() typechecks against the mock (npm run
+// typecheck:test) and so addSettingTab survives onload.
 export class Setting {
-	name = "";
-	desc = "";
-	isHeading = false;
-	components: ValueComponent<any>[] = [];
+	constructor(public containerEl: FakeEl) {}
 
-	constructor(public containerEl: FakeEl) {
-		// Register on the container so a test can find settings by name.
-		(containerEl as any).__settings ??= [];
-		(containerEl as any).__settings.push(this);
-	}
-
-	setName(name: string): this {
-		this.name = name;
+	setName(_name: string): this {
 		return this;
 	}
 
-	setDesc(desc: string): this {
-		this.desc = desc;
+	setDesc(_desc: string): this {
 		return this;
 	}
 
 	setHeading(): this {
-		this.isHeading = true;
 		return this;
 	}
 
 	addText(cb: (t: TextComponent) => any): this {
-		const c = new TextComponent();
-		this.components.push(c);
-		cb(c);
+		cb(new TextComponent());
 		return this;
 	}
 
 	addTextArea(cb: (t: TextAreaComponent) => any): this {
-		const c = new TextAreaComponent();
-		this.components.push(c);
-		cb(c);
-		return this;
-	}
-
-	addToggle(cb: (t: ToggleComponent) => any): this {
-		const c = new ToggleComponent();
-		this.components.push(c);
-		cb(c);
+		cb(new TextAreaComponent());
 		return this;
 	}
 }
@@ -738,26 +623,4 @@ export class PluginSettingTab {
 	hide(): void {
 		/* no-op */
 	}
-
-	// Test helper: find a Setting by its displayed name.
-	__setting(name: string): Setting | undefined {
-		return ((this.containerEl as any).__settings as Setting[] | undefined)?.find(
-			(s) => s.name === name,
-		);
-	}
-}
-
-// ─── Test utilities ───────────────────────────────────────────────────────────
-
-// Read a file's frontmatter as parsed values. Tests should use this rather than
-// asserting on raw text, so they are not coupled to this fake's serializer.
-export function readFrontMatter(
-	vault: Vault,
-	path: string,
-): Record<string, unknown> {
-	return parseFrontMatter(vault.__contentOf(path) ?? "");
-}
-
-export function __resetMockState(): void {
-	__resetNotices();
 }
