@@ -92,7 +92,8 @@ function isAutoImportMapping(value: unknown): value is AutoImportMapping {
 		typeof value.folder === "string" &&
 		typeof value.author === "string" &&
 		typeof value.contentOrigin === "string" &&
-		(value.pattern === undefined || typeof value.pattern === "string")
+		(value.filenamePattern === undefined ||
+			typeof value.filenamePattern === "string")
 	);
 }
 

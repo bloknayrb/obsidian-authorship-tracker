@@ -518,6 +518,40 @@ describe("AuthorshipTrackerPlugin", () => {
 			});
 		});
 
+		it("drops a stored mapping whose filenamePattern is not a string", async () => {
+			// data.json is a plain file a user (or a sync conflict) can corrupt. A
+			// non-string pattern used to slip past the settings guard and then throw
+			// out of pattern validation during onload, taking the whole plugin down.
+			plugin = await boot(app, {
+				autoImportFolders: [
+					{
+						folder: "Emails",
+						author: "importer:email",
+						contentOrigin: "primary",
+						filenamePattern: 42,
+					},
+					{
+						folder: "Meetings",
+						author: "importer:transcript",
+						contentOrigin: "primary",
+					},
+				],
+			});
+			app.vault.__seedFolder("Emails");
+			app.vault.__seedFolder("Meetings");
+
+			await app.vault.create("Emails/msg.md", "# hi\n");
+			await app.vault.create("Meetings/note.md", "# hi\n");
+			await vi.advanceTimersByTimeAsync(AUTO_IMPORT_STAMP_DELAY_MS);
+
+			expect(plugin.settings.autoImportFolders).toHaveLength(1);
+			expect(readFrontMatter(app, "Emails/msg.md")).toEqual({});
+			// Positive control: the well-formed mapping still works.
+			expect(readFrontMatter(app, "Meetings/note.md").created_by).toBe(
+				"importer:transcript",
+			);
+		});
+
 		it("does not hang vault event handling on a catastrophic pattern", async () => {
 			// The headline claim for #7. Unguarded, this filename against this
 			// pattern takes roughly 80 seconds on the UI thread. The bound is
