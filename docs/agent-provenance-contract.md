@@ -33,11 +33,11 @@ Use `ai-generated` for model-written prose without durable grounding. Use `ai-de
 
 ## External event schema
 
-Each event is one JSON object on one line in the configured daily `YYYY-MM-DD.jsonl` file. The existing core fields remain compatible with plugin-generated records. External writers add the optional fields below.
+Each event is one JSON object on one line in the configured daily `YYYY-MM-DD.jsonl` file, where the file name is the event's local date in the vault owner's timezone. The existing core fields remain compatible with plugin-generated records: the plugin writes local wall-clock timestamps, so external writers must use the same local-time format rather than UTC. External writers add the optional fields below.
 
 | Field | Required | Rule |
 | --- | --- | --- |
-| `ts` | yes | RFC 3339 UTC timestamp, for example `2026-08-25T18:00:00.000Z`. |
+| `ts` | yes | Local wall-clock timestamp in the vault owner's timezone, formatted `YYYY-MM-DDTHH:mm:ss` with no timezone suffix and no milliseconds, for example `2026-08-25T18:00:00`. This matches the plugin's own timestamps, so external and plugin events in the same daily file sort together. |
 | `file` | yes | Normalized vault-relative Markdown path using `/`; never absolute and never containing `..`. |
 | `author` | yes | Same configured identity as `writer_id`. |
 | `action` | yes | `created` or `modified`. |
@@ -52,13 +52,13 @@ Each event is one JSON object on one line in the configured daily `YYYY-MM-DD.js
 Example new-note event:
 
 ```json
-{"ts":"2026-08-25T18:00:00.000Z","file":"Research/Brief.md","author":"hermes","action":"created","summary":"Created AI-derived research brief","provenance_version":1,"writer_kind":"agent","writer_id":"hermes","event_id":"evt_01","content_change":true,"source_refs":["Sources/Interview transcript.md"]}
+{"ts":"2026-08-25T18:00:00","file":"Research/Brief.md","author":"hermes","action":"created","summary":"Created AI-derived research brief","provenance_version":1,"writer_kind":"agent","writer_id":"hermes","event_id":"evt_01","content_change":true,"source_refs":["Sources/Interview transcript.md"]}
 ```
 
 Example edit event:
 
 ```json
-{"ts":"2026-08-25T18:05:00.000Z","file":"Research/Brief.md","author":"hermes","action":"modified","summary":"Added sourced decision summary","provenance_version":1,"writer_kind":"agent","writer_id":"hermes","event_id":"evt_02","content_change":true,"source_refs":["https://example.com/source"]}
+{"ts":"2026-08-25T18:05:00","file":"Research/Brief.md","author":"hermes","action":"modified","summary":"Added sourced decision summary","provenance_version":1,"writer_kind":"agent","writer_id":"hermes","event_id":"evt_02","content_change":true,"source_refs":["https://example.com/source"]}
 ```
 
 An explicitly requested provenance correction uses `action: "modified"` and `content_change: false`.
