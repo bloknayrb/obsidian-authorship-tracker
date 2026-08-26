@@ -30,6 +30,7 @@ import type {
 	FileManager as RealFileManager,
 	TFile as RealTFile,
 	TFolder as RealTFolder,
+	PluginSettingTab as RealPluginSettingTab,
 	Vault as RealVault,
 	Workspace as RealWorkspace,
 } from "obsidian";
@@ -40,6 +41,7 @@ import type {
 	FileManager as MockFileManager,
 	TFile as MockTFile,
 	TFolder as MockTFolder,
+	PluginSettingTab as MockPluginSettingTab,
 	Vault as MockVault,
 	Workspace as MockWorkspace,
 } from "./obsidian-mock";
@@ -103,6 +105,25 @@ export type _TFolderOnReal = AssertNoneMissing<
 >;
 export type _TFolderOnMock = AssertNoneMissing<
 	Missing<TFolderMembers, MockTFolder>
+>;
+
+// ── PluginSettingTab ──────────────────────────────────────────────────────────
+// The declarative members are the ones worth pinning: they are new in 1.13 and
+// the mock had to grow its own stand-ins for them, so a rename on either side
+// would otherwise go unnoticed until a user on 1.13 opened the settings tab.
+type PluginSettingTabMembers =
+	| "app"
+	| "containerEl"
+	| "display"
+	| "hide"
+	| "getSettingDefinitions"
+	| "getControlValue"
+	| "setControlValue";
+export type _PluginSettingTabOnReal = AssertNoneMissing<
+	Missing<PluginSettingTabMembers, RealPluginSettingTab>
+>;
+export type _PluginSettingTabOnMock = AssertNoneMissing<
+	Missing<PluginSettingTabMembers, MockPluginSettingTab>
 >;
 
 // ── Free functions ────────────────────────────────────────────────────────────
