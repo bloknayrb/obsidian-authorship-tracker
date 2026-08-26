@@ -152,6 +152,24 @@ describe("AuthorshipTrackerPlugin", () => {
 	// ── Ignore rules ──────────────────────────────────────────────────────────
 
 	describe("ignore rules", () => {
+		it("ignores the vault's configured folder rather than assuming .obsidian", async () => {
+			app.vault.configDir = "Vault Settings";
+			const configFile = app.vault.__seed(
+				"Vault Settings/appearance.md",
+				"# Settings\n",
+			);
+			const ordinaryFile = app.vault.__seed("Notes/a.md", "# Note\n");
+			plugin = await boot(app);
+
+			await edit(app, configFile, "# Settings\nchanged\n");
+			await edit(app, ordinaryFile, "# Note\nchanged\n");
+
+			expect(readFrontMatter(app, configFile.path)).toEqual({});
+			expect(readFrontMatter(app, ordinaryFile.path).last_modified_by).toBe(
+				"tester",
+			);
+		});
+
 		it("skips ignored folders while still stamping everything else", async () => {
 			const keep = app.vault.__seed("Notes/keep.md", "# keep\n");
 			const skip = app.vault.__seed("Templates/skip.md", "# skip\n");
@@ -498,6 +516,40 @@ describe("AuthorshipTrackerPlugin", () => {
 				author: "importer:email",
 				contentOrigin: "primary",
 			});
+		});
+
+		it("drops a stored mapping whose filenamePattern is not a string", async () => {
+			// data.json is a plain file a user (or a sync conflict) can corrupt. A
+			// non-string pattern used to slip past the settings guard and then throw
+			// out of pattern validation during onload, taking the whole plugin down.
+			plugin = await boot(app, {
+				autoImportFolders: [
+					{
+						folder: "Emails",
+						author: "importer:email",
+						contentOrigin: "primary",
+						filenamePattern: 42,
+					},
+					{
+						folder: "Meetings",
+						author: "importer:transcript",
+						contentOrigin: "primary",
+					},
+				],
+			});
+			app.vault.__seedFolder("Emails");
+			app.vault.__seedFolder("Meetings");
+
+			await app.vault.create("Emails/msg.md", "# hi\n");
+			await app.vault.create("Meetings/note.md", "# hi\n");
+			await vi.advanceTimersByTimeAsync(AUTO_IMPORT_STAMP_DELAY_MS);
+
+			expect(plugin.settings.autoImportFolders).toHaveLength(1);
+			expect(readFrontMatter(app, "Emails/msg.md")).toEqual({});
+			// Positive control: the well-formed mapping still works.
+			expect(readFrontMatter(app, "Meetings/note.md").created_by).toBe(
+				"importer:transcript",
+			);
 		});
 
 		it("does not hang vault event handling on a catastrophic pattern", async () => {

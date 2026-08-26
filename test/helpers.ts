@@ -7,6 +7,13 @@ import { App, MarkdownView, TFile, parseFrontMatter } from "obsidian";
 import AuthorshipTrackerPlugin from "../main";
 import { localDateString } from "../src/time";
 
+// Obsidian runs in a browser window; the unit suite runs in Vitest's Node
+// environment. Keep the mock runtime honest after production code switches to
+// window-scoped timers for popout-window compatibility.
+if (!("window" in globalThis)) {
+	Object.assign(globalThis, { window: globalThis });
+}
+
 export const MANIFEST = {
 	id: "authorship-tracker",
 	name: "Authorship Tracker",

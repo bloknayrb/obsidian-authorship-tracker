@@ -115,6 +115,9 @@ export class TFolder extends TAbstractFile {
 // ─── Vault ────────────────────────────────────────────────────────────────────
 
 export class Vault extends Events {
+	// The config folder is user-configurable in real Obsidian. Tests override it
+	// to ensure plugin defaults do not assume the conventional name.
+	configDir = ".obsidian";
 	private _files = new Map<string, TAbstractFile>();
 	private _content = new Map<string, string>();
 	private _root: TFolder;
@@ -330,7 +333,16 @@ function serializeFrontMatter(fm: Record<string, unknown>): string {
 }
 
 export class FileManager {
+	// Test-visible record of trash operations. The real API respects the user's
+	// deletion preference, unlike Vault.delete().
+	__trashed: TAbstractFile[] = [];
+
 	constructor(private vault: Vault) {}
+
+	async trashFile(file: TAbstractFile): Promise<void> {
+		this.__trashed.push(file);
+		await this.vault.delete(file);
+	}
 
 	async processFrontMatter(
 		file: TFile,

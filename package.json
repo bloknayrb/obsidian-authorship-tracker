@@ -1,6 +1,6 @@
 {
   "name": "authorship-tracker",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Tracks who creates and modifies notes — designed for human/AI collaborative vaults.",
   "main": "main.js",
   "scripts": {
@@ -26,7 +26,6 @@
     "@types/node": "^20.11.0",
     "@typescript-eslint/eslint-plugin": "^6.21.0",
     "@typescript-eslint/parser": "^6.21.0",
-    "builtin-modules": "3.3.0",
     "esbuild": "0.28.2",
     "eslint": "^8.57.0",
     "obsidian": "latest",

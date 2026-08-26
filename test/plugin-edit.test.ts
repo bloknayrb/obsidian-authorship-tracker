@@ -327,6 +327,12 @@ describe("#4 — calendar-day log retention", () => {
 		await vi.advanceTimersByTimeAsync(0);
 
 		expect(folderContents(app, "Authorship Logs")).toEqual(["2026-08-25.jsonl"]);
+		expect(app.fileManager.__trashed.map((file) => file.name).sort()).toEqual([
+			"2020-01-01.jsonl",
+			"2020-01-02.jsonl",
+			"2020-01-03.jsonl",
+			"2020-01-04.jsonl",
+		]);
 	});
 
 	it("keeps everything at retention 0", async () => {
