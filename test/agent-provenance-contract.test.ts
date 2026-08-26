@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { formatLocalTimestamp } from "../src/time";
+
 const root = resolve(__dirname, "..");
 const contractPath = resolve(root, "docs/agent-provenance-contract.md");
 const skillPath = resolve(root, "skills/obsidian-authorship-tracker/SKILL.md");
@@ -15,7 +17,7 @@ describe("agent provenance contract", () => {
 		expect(contract).toContain("cooperative, best-effort declared provenance");
 		expect(contract).toContain("not identity verification");
 		expect(contract).toContain("tamper-evident audit logging");
-		expect(skill).toMatch(/^---\nname: obsidian-authorship-tracker\n/m);
+		expect(skill).toMatch(/^---\nname: obsidian-authorship-tracker\n/);
 		expect(skill).toContain("Read back");
 	});
 
@@ -37,6 +39,16 @@ describe("agent provenance contract", () => {
 		}
 		expect(contract).toContain("`created`");
 		expect(contract).toContain("`modified`");
+	});
+
+	it("documents timestamps in the plugin's local wall-clock format", () => {
+		const contract = read(contractPath);
+
+		for (const ts of contract.match(/"ts":"[^"]*"/g) ?? []) {
+			expect(ts).toMatch(/^"ts":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"$/);
+		}
+		expect(contract).toContain(formatLocalTimestamp(new Date(2026, 7, 25, 18, 0, 0)));
+		expect(contract).not.toMatch(/RFC 3339 UTC/);
 	});
 
 	it("requires abstention, preserves original provenance, and leaves edit_count plugin-owned", () => {
