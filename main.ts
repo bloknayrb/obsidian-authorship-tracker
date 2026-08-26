@@ -7,6 +7,7 @@ import {
 	Plugin,
 	PluginSettingTab,
 	Setting,
+	SettingDefinitionItem,
 	TFile,
 	TFolder,
 	normalizePath,
@@ -22,6 +23,15 @@ import {
 	patternProblems,
 } from "./src/mappings";
 import { describeProblem, setPoisonListener } from "./src/patterns";
+import {
+	AuthorshipTrackerSettings,
+	NUMERIC_BOUNDS,
+	SETTING_COPY,
+	SettingKey,
+	applyControlValue,
+	readControlValue,
+	validateControlValue,
+} from "./src/settings-controls";
 import { shouldIgnoreFile } from "./src/paths";
 import { isLogExpired } from "./src/retention";
 import { formatLocalTimestamp, localDateString } from "./src/time";
@@ -50,16 +60,6 @@ function clearWindowTimer(timer: WindowTimer): void {
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
-interface AuthorshipTrackerSettings {
-	authorName: string;
-	debounceMs: number;
-	maxCacheSize: number;
-	ignoreFolders: string[];
-	ignoreFiles: string[];
-	editLogsPath: string;
-	logRetentionDays: number;
-	autoImportFolders: AutoImportMapping[];
-}
 
 const DEFAULT_SETTINGS: Omit<AuthorshipTrackerSettings, "ignoreFolders"> = {
 	authorName: "",
@@ -648,6 +648,29 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 
 // ─── Settings Tab ─────────────────────────────────────────────────────────────
 
+// Report unusable filename patterns in a set of mappings, if any.
+//
+// The mappings are already stored by the time this runs. An unusable pattern is
+// kept verbatim rather than stripped: getAutoImportResult treats it as a
+// non-match, so the mapping never fires, whereas stripping it would leave a bare
+// Folder=Author|Origin rule matching every file in that folder.
+function warnAboutMappingPatterns(mappings: AutoImportMapping[]): void {
+	const issues = patternProblems(mappings);
+	if (issues.length === 0) return;
+	const detail = issues
+		.map((i) => `"${i.pattern}" (${describeProblem(i.problem)})`)
+		.join("; ");
+	new Notice(
+		`Authorship Tracker: unusable filename pattern(s): ${detail}. Those mappings will not match anything until fixed.`,
+	);
+}
+
+// Adapter for the control `validate` hook, which expects a message or nothing.
+function validateMessage(key: SettingKey, value: unknown): string | void {
+	const message = validateControlValue(key, value);
+	if (message) return message;
+}
+
 class AuthorshipTrackerSettingTab extends PluginSettingTab {
 	plugin: AuthorshipTrackerPlugin;
 	private _mappingsDebounce: WindowTimer | null = null;
@@ -689,33 +712,177 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 		if (this.plugin.isDisabled) return;
 
 		const mappings = parseMappings(value);
-		const issues = patternProblems(mappings);
-
-		if (issues.length > 0) {
-			const detail = issues
-				.map((i) => `"${i.pattern}" (${describeProblem(i.problem)})`)
-				.join("; ");
-			new Notice(
-				`Authorship Tracker: unusable filename pattern(s): ${detail}. Those mappings will not match anything until fixed.`,
-			);
-		}
+		warnAboutMappingPatterns(mappings);
 
 		this.plugin.settings.autoImportFolders = mappings;
 		await this.plugin.saveSettings();
 	}
 
+	// ── Declarative settings (Obsidian 1.13+) ────────────────────────────────
+	//
+	// Returning a non-empty array here means Obsidian renders the tab itself and
+	// never calls display(), which buys settings search and consistent layout.
+	// display() is kept below as the pre-1.13 path: older Obsidian has no call
+	// site for these three methods, so they are inert there and minAppVersion
+	// stays at 1.6.6 rather than cutting off everyone below 1.13.
+	//
+	// Called once from addSettingTab() during onload for search indexing, and on
+	// every open — so it must be safe to run at load time. It is: settings are
+	// loaded before the tab is registered.
+	getSettingDefinitions(): SettingDefinitionItem<SettingKey>[] {
+		const configDir = this.app.vault.configDir;
+		const copy = SETTING_COPY;
+		return [
+			{
+				name: copy.authorName.name,
+				desc: copy.authorName.desc,
+				control: {
+					type: "text",
+					key: "authorName",
+					placeholder: copy.authorName.placeholder,
+				},
+			},
+			{
+				name: copy.debounceMs.name,
+				desc: copy.debounceMs.desc,
+				control: {
+					type: "number",
+					key: "debounceMs",
+					placeholder: copy.debounceMs.placeholder,
+					min: NUMERIC_BOUNDS.debounceMs,
+					// An unparseable field falls back to defaultValue, so this must
+					// be a usable delay rather than the implicit 0.
+					defaultValue: DEFAULT_SETTINGS.debounceMs,
+					validate: (value) => validateMessage("debounceMs", value),
+				},
+			},
+			{
+				name: copy.maxCacheSize.name,
+				desc: copy.maxCacheSize.desc,
+				control: {
+					type: "number",
+					key: "maxCacheSize",
+					placeholder: copy.maxCacheSize.placeholder,
+					min: NUMERIC_BOUNDS.maxCacheSize,
+					defaultValue: DEFAULT_SETTINGS.maxCacheSize,
+					validate: (value) => validateMessage("maxCacheSize", value),
+				},
+			},
+			{
+				name: copy.ignoreFolders.name,
+				desc: copy.ignoreFolders.desc,
+				control: {
+					type: "textarea",
+					key: "ignoreFolders",
+					placeholder: copy.ignoreFolders.placeholder(configDir),
+				},
+			},
+			{
+				name: copy.ignoreFiles.name,
+				desc: copy.ignoreFiles.desc,
+				control: {
+					type: "textarea",
+					key: "ignoreFiles",
+					placeholder: copy.ignoreFiles.placeholder,
+				},
+			},
+			{
+				name: copy.editLogsPath.name,
+				desc: copy.editLogsPath.desc,
+				control: {
+					type: "text",
+					key: "editLogsPath",
+					placeholder: copy.editLogsPath.placeholder,
+					validate: (value) => validateMessage("editLogsPath", value),
+				},
+			},
+			{
+				name: copy.logRetentionDays.name,
+				desc: copy.logRetentionDays.desc,
+				control: {
+					type: "number",
+					key: "logRetentionDays",
+					placeholder: copy.logRetentionDays.placeholder,
+					min: NUMERIC_BOUNDS.logRetentionDays,
+					defaultValue: DEFAULT_SETTINGS.logRetentionDays,
+					validate: (value) => validateMessage("logRetentionDays", value),
+				},
+			},
+			{
+				type: "group",
+				heading: copy.autoImportFolders.heading,
+				items: [
+					{
+						name: copy.autoImportFolders.name,
+						desc: copy.autoImportFolders.desc,
+						control: {
+							type: "textarea",
+							key: "autoImportFolders",
+							rows: 8,
+							placeholder: copy.autoImportFolders.placeholder,
+							// Deliberately no validate: returning a message would
+							// reject the whole textarea over one bad pattern, and
+							// validate also runs on mount, which would probe every
+							// stored pattern on the UI thread each time settings
+							// open. Unusable patterns are reported by Notice instead.
+						},
+					},
+				],
+			},
+		];
+	}
+
+	getControlValue(key: string): unknown {
+		return readControlValue(this.plugin.settings, key as SettingKey);
+	}
+
+	// Every key is handled explicitly and the write goes through the plugin's own
+	// saveSettings(), never the inherited default. Two reasons:
+	//
+	//   * saveSettings() also resizes the live content cache. The default write
+	//     path only persists, so "Cache size" would save a new number and leave
+	//     the running cache at its old capacity.
+	//   * the default would happily store a raw textarea string in an
+	//     array-typed field; loadSettings rejects malformed values and silently
+	//     substitutes defaults, so a missed key would quietly wipe the user's
+	//     ignore lists and auto-import mappings on the next launch.
+	async setControlValue(key: string, value: unknown): Promise<void> {
+		if (this.plugin.isDisabled) return;
+		const settingKey = key as SettingKey;
+		applyControlValue(this.plugin.settings, settingKey, value);
+		await this.plugin.saveSettings();
+		// Unlike display(), the value is stored immediately: Obsidian reseeds a
+		// control from getControlValue on every render, and a render can happen
+		// while a debounce is pending (search, a visibility predicate), which
+		// would discard what the user had typed. Only the cost of pattern
+		// validation is deferred.
+		if (settingKey === "autoImportFolders") this.scheduleMappingWarning();
+	}
+
+	// Warn about unusable filename patterns, debounced. Validation probes each
+	// pattern against adversarial inputs and is far too costly per keystroke.
+	private scheduleMappingWarning(): void {
+		if (this._mappingsDebounce) clearWindowTimer(this._mappingsDebounce);
+		this._mappingsDebounce = window.setTimeout(() => {
+			this._mappingsDebounce = null;
+			if (this.plugin.isDisabled) return;
+			warnAboutMappingPatterns(this.plugin.settings.autoImportFolders);
+		}, MAPPINGS_VALIDATE_DELAY_MS);
+	}
+
+	// ── Imperative settings (pre-1.13 fallback) ──────────────────────────────
+	//
+	// Not called on 1.13+, where getSettingDefinitions() renders the tab instead.
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
 
 		new Setting(containerEl)
-			.setName("Author name")
-			.setDesc(
-				"Name to stamp in the last_modified_by and created_by fields.",
-			)
+			.setName(SETTING_COPY.authorName.name)
+			.setDesc(SETTING_COPY.authorName.desc)
 			.addText((text) =>
 				text
-					.setPlaceholder("me")
+					.setPlaceholder(SETTING_COPY.authorName.placeholder)
 					.setValue(this.plugin.settings.authorName)
 					.onChange(async (value) => {
 						this.plugin.settings.authorName = value.trim();
@@ -724,13 +891,11 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Debounce delay")
-			.setDesc(
-				"Milliseconds to wait after the last keystroke before stamping (minimum 1000).",
-			)
+			.setName(SETTING_COPY.debounceMs.name)
+			.setDesc(SETTING_COPY.debounceMs.desc)
 			.addText((text) =>
 				text
-					.setPlaceholder("10000")
+					.setPlaceholder(SETTING_COPY.debounceMs.placeholder)
 					.setValue(String(this.plugin.settings.debounceMs))
 					.onChange(async (value) => {
 						const parsed = parseInt(value);
@@ -742,13 +907,11 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Cache size")
-			.setDesc(
-				"Maximum number of file snapshots to keep in memory for diff computation.",
-			)
+			.setName(SETTING_COPY.maxCacheSize.name)
+			.setDesc(SETTING_COPY.maxCacheSize.desc)
 			.addText((text) =>
 				text
-					.setPlaceholder("50")
+					.setPlaceholder(SETTING_COPY.maxCacheSize.placeholder)
 					.setValue(String(this.plugin.settings.maxCacheSize))
 					.onChange(async (value) => {
 						const parsed = parseInt(value);
@@ -760,14 +923,14 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Ignored folders")
-			.setDesc(
-				"Comma-separated folder names to exclude from tracking, matched at any depth.",
-			)
+			.setName(SETTING_COPY.ignoreFolders.name)
+			.setDesc(SETTING_COPY.ignoreFolders.desc)
 			.addTextArea((text) =>
 				text
 					.setPlaceholder(
-						`Templates, Excalidraw, ${this.app.vault.configDir}`,
+						SETTING_COPY.ignoreFolders.placeholder(
+							this.app.vault.configDir,
+						),
 					)
 					.setValue(this.plugin.settings.ignoreFolders.join(", "))
 					.onChange(async (value) => {
@@ -780,13 +943,11 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Ignored files")
-			.setDesc(
-				"Comma-separated file names to exclude from tracking.",
-			)
+			.setName(SETTING_COPY.ignoreFiles.name)
+			.setDesc(SETTING_COPY.ignoreFiles.desc)
 			.addTextArea((text) =>
 				text
-					.setPlaceholder("secret.md, scratch.md")
+					.setPlaceholder(SETTING_COPY.ignoreFiles.placeholder)
 					.setValue(this.plugin.settings.ignoreFiles.join(", "))
 					.onChange(async (value) => {
 						this.plugin.settings.ignoreFiles = value
@@ -798,11 +959,11 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Edit logs path")
-			.setDesc("Vault-relative folder where daily JSONL logs are written.")
+			.setName(SETTING_COPY.editLogsPath.name)
+			.setDesc(SETTING_COPY.editLogsPath.desc)
 			.addText((text) =>
 				text
-					.setPlaceholder("Authorship Logs")
+					.setPlaceholder(SETTING_COPY.editLogsPath.placeholder)
 					.setValue(this.plugin.settings.editLogsPath)
 					.onChange(async (value) => {
 						const trimmed = value.trim();
@@ -818,13 +979,11 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Log retention")
-			.setDesc(
-				"Delete daily logs older than this many days, counted in whole calendar days. Today's log is always kept, and 1 also keeps yesterday's. Set to 0 to keep all logs.",
-			)
+			.setName(SETTING_COPY.logRetentionDays.name)
+			.setDesc(SETTING_COPY.logRetentionDays.desc)
 			.addText((text) =>
 				text
-					.setPlaceholder("0")
+					.setPlaceholder(SETTING_COPY.logRetentionDays.placeholder)
 					.setValue(String(this.plugin.settings.logRetentionDays))
 					.onChange(async (value) => {
 						const parsed = parseInt(value);
@@ -835,7 +994,9 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl).setName("Auto-import folders").setHeading();
+		new Setting(containerEl)
+			.setName(SETTING_COPY.autoImportFolders.heading)
+			.setHeading();
 
 		const desc = containerEl.createEl("p", {
 			cls: "setting-item-description",
@@ -845,16 +1006,14 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 		);
 
 		new Setting(containerEl)
-			.setName("Folder-to-author mappings")
-			.setDesc(
-				"Example: Emails=importer:email|primary. The optional third field is a regex matched against the file name.",
-			)
+			.setName(SETTING_COPY.autoImportFolders.name)
+			.setDesc(SETTING_COPY.autoImportFolders.desc)
 			.addTextArea((text) => {
 				text.inputEl.rows = 8;
 				text.inputEl.cols = 50;
 				text
 					.setPlaceholder(
-						"Emails=importer:email|primary\nMeetings=importer:transcript|primary|^Transcript-",
+						SETTING_COPY.autoImportFolders.placeholder,
 					)
 					.setValue(
 						serializeMappings(

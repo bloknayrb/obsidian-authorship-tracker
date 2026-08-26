@@ -646,6 +646,49 @@ export class Setting {
 	}
 }
 
+// ─── Declarative settings (Obsidian 1.13+) ────────────────────────────────────
+//
+// Structural mirrors of the real definition types. Only the fields main.ts sets
+// are modelled; test/mock-conformance.ts pins the SettingTab method names
+// against the real .d.ts so this cannot drift silently.
+
+export interface SettingControlSpec<K extends string = string> {
+	type: "text" | "textarea" | "number" | "toggle" | "dropdown";
+	key: K;
+	placeholder?: string;
+	rows?: number;
+	min?: number;
+	max?: number;
+	defaultValue?: unknown;
+	validate?: (value: any) => string | void | Promise<string | void>;
+	disabled?: boolean | (() => boolean);
+}
+
+export interface SettingDefinitionSpec<K extends string = string> {
+	name: string;
+	desc?: string;
+	aliases?: string[];
+	control: SettingControlSpec<K>;
+	visible?: boolean | (() => boolean);
+}
+
+export interface SettingGroupSpec<K extends string = string> {
+	type: "group" | "list";
+	heading?: string;
+	items?: SettingDefinitionSpec<K>[];
+	visible?: boolean | (() => boolean);
+}
+
+export type SettingDefinitionItem<K extends string = string> =
+	| SettingDefinitionSpec<K>
+	| SettingGroupSpec<K>;
+
+function isGroup<K extends string>(
+	item: SettingDefinitionItem<K>,
+): item is SettingGroupSpec<K> {
+	return (item as SettingGroupSpec<K>).type === "group";
+}
+
 export class PluginSettingTab {
 	containerEl: FakeEl = new FakeEl();
 
@@ -659,8 +702,70 @@ export class PluginSettingTab {
 		/* overridden */
 	}
 
+	getSettingDefinitions(): SettingDefinitionItem[] {
+		return [];
+	}
+
+	getControlValue(_key: string): unknown {
+		/* overridden */
+		return undefined;
+	}
+
+	setControlValue(_key: string, _value: unknown): void | Promise<void> {
+		/* overridden */
+	}
+
 	// Test helper: find a Setting by its displayed name.
 	__setting(name: string): Setting | undefined {
 		return this.containerEl.__settings.find((s) => s.name === name);
+	}
+
+	// ── Test-side emulation of the 1.13 render contract ──────────────────────
+	//
+	// Obsidian owns rendering on 1.13+, so these helpers stand in for it. They
+	// model only what the real framework documents:
+	//   * definitions are walked, groups flattened
+	//   * a control is seeded from getControlValue on EVERY render
+	//   * a user change runs validate first, and a returned message rejects the
+	//     change without persisting it
+	// Anything the typings leave unspecified is deliberately not invented here.
+
+	// Flatten definitions to their control-bearing leaves, in render order.
+	__controls(): SettingDefinitionSpec[] {
+		const out: SettingDefinitionSpec[] = [];
+		for (const item of this.getSettingDefinitions()) {
+			if (isGroup(item)) out.push(...(item.items ?? []));
+			else out.push(item);
+		}
+		return out;
+	}
+
+	__control(name: string): SettingDefinitionSpec | undefined {
+		return this.__controls().find((d) => d.name === name);
+	}
+
+	// The value the framework would display for a control, re-read from the
+	// plugin's storage as a fresh render would.
+	__renderedValue(name: string): unknown {
+		const def = this.__control(name);
+		if (!def) throw new Error(`no control named ${name}`);
+		const value = this.getControlValue(def.control.key);
+		return value === undefined || value === null
+			? def.control.defaultValue
+			: value;
+	}
+
+	// Simulate the user committing a value. Returns the validation message when
+	// the change is rejected, or null when it is accepted and persisted.
+	async __setControlFromUser(
+		name: string,
+		value: unknown,
+	): Promise<string | null> {
+		const def = this.__control(name);
+		if (!def) throw new Error(`no control named ${name}`);
+		const message = await def.control.validate?.(value);
+		if (typeof message === "string" && message) return message;
+		await this.setControlValue(def.control.key, value);
+		return null;
 	}
 }
