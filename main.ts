@@ -40,6 +40,14 @@ const NOTICE_THROTTLE_MS = 60000;
 // backtracking, which is far too costly to run per keystroke.
 const MAPPINGS_VALIDATE_DELAY_MS = 600;
 
+// @types/node augments the global timer overloads even though Obsidian runs in
+// a browser window. Keep timer handles browser-scoped, and bridge that ambient
+// type mismatch in one place.
+type WindowTimer = number;
+function clearWindowTimer(timer: WindowTimer): void {
+	window.clearTimeout(timer as Parameters<typeof window.clearTimeout>[0]);
+}
+
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
 interface AuthorshipTrackerSettings {
@@ -53,16 +61,40 @@ interface AuthorshipTrackerSettings {
 	autoImportFolders: AutoImportMapping[];
 }
 
-const DEFAULT_SETTINGS: AuthorshipTrackerSettings = {
+const DEFAULT_SETTINGS: Omit<AuthorshipTrackerSettings, "ignoreFolders"> = {
 	authorName: "",
 	debounceMs: 10000,
 	maxCacheSize: 50,
-	ignoreFolders: ["Templates", "Excalidraw", ".obsidian"],
 	ignoreFiles: [],
 	editLogsPath: "Authorship Logs",
 	logRetentionDays: 0,
 	autoImportFolders: [],
 };
+
+function defaultSettings(configDir: string): AuthorshipTrackerSettings {
+	return {
+		...DEFAULT_SETTINGS,
+		ignoreFolders: ["Templates", "Excalidraw", configDir],
+	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isAutoImportMapping(value: unknown): value is AutoImportMapping {
+	return (
+		isRecord(value) &&
+		typeof value.folder === "string" &&
+		typeof value.author === "string" &&
+		typeof value.contentOrigin === "string" &&
+		(value.pattern === undefined || typeof value.pattern === "string")
+	);
+}
 
 // ─── JSONL Log Entry ──────────────────────────────────────────────────────────
 
@@ -95,10 +127,10 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 	// by path, because they are about a location's content rather than a note's
 	// identity. The rename handler re-keys the cache; _stampInProgress needs no
 	// handler because an entry lives only for the duration of one stamp.
-	private _pendingEdits: Map<TFile, ReturnType<typeof setTimeout>> = new Map();
+	private _pendingEdits: Map<TFile, WindowTimer> = new Map();
 	// Auto-import settle timers, so a disabled plugin cannot stamp a file after
 	// the fact.
-	private _autoImportTimers: Set<ReturnType<typeof setTimeout>> = new Set();
+	private _autoImportTimers: Set<WindowTimer> = new Set();
 	private _lastNoticeTime = 0;
 	// Set in onunload so in-flight work stops before it writes.
 	private _unloaded = false;
@@ -133,12 +165,12 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 
 					// Reset the debounce window for this note.
 					const existing = this._pendingEdits.get(file);
-					if (existing) clearTimeout(existing);
+					if (existing) clearWindowTimer(existing);
 
 					// Capture the editor that emitted the event, together with the
 					// view it came from. The view is what lets us check at fire time
 					// that the editor still holds THIS note (see flushEdit).
-					const timer = setTimeout(() => {
+					const timer = window.setTimeout(() => {
 						this._pendingEdits.delete(file);
 						void this.flushEdit(file, editor, info);
 					}, this.settings.debounceMs);
@@ -157,7 +189,7 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 				// cached baseline, though, is required.
 				const pending = this._pendingEdits.get(file);
 				if (pending) {
-					clearTimeout(pending);
+					clearWindowTimer(pending);
 					this._pendingEdits.delete(file);
 				}
 				this._contentCache.delete(file.path);
@@ -220,7 +252,7 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 					if (!result) return;
 
 					const createPath = file.path;
-					const timer = setTimeout(() => {
+					const timer = window.setTimeout(() => {
 						this._autoImportTimers.delete(timer);
 						const currentFile =
 							this.app.vault.getAbstractFileByPath(createPath);
@@ -234,7 +266,7 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 
 			// Prune old logs once, after the vault is ready (no-op unless the
 			// user has enabled retention).
-			this.pruneLogs();
+			void this.pruneLogs();
 		});
 
 		this.addCommand({
@@ -277,12 +309,12 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 		// write arriving from a plugin the user has just switched off is worse
 		// than losing an edit that was still inside its debounce window.
 		for (const timer of this._pendingEdits.values()) {
-			clearTimeout(timer);
+			clearWindowTimer(timer);
 		}
 		this._pendingEdits.clear();
 
 		for (const timer of this._autoImportTimers) {
-			clearTimeout(timer);
+			clearWindowTimer(timer);
 		}
 		this._autoImportTimers.clear();
 	}
@@ -397,7 +429,9 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 		this._contentCache.set(file.path, currentContent);
 
 		try {
-			await this.app.fileManager.processFrontMatter(file, (fm) => {
+			await this.app.fileManager.processFrontMatter(file, (rawFrontmatter) => {
+				const frontmatter: unknown = rawFrontmatter;
+				if (!isRecord(frontmatter)) return;
 				// Last point at which an in-flight stamp can still be abandoned:
 				// processFrontMatter reads the file before invoking this, so the
 				// plugin may have been disabled in between. Returning without
@@ -408,23 +442,23 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 				// is not owned by an auto-import mapping (whose create handler
 				// sets the authoritative origin). Never overwrite an existing
 				// content_origin.
-				if (!fm["created_by"]) {
+				if (!frontmatter["created_by"]) {
 					const auto = getAutoImportResult(
 						this.settings.autoImportFolders,
 						file.path,
 						file.name,
 					);
 					if (!auto) {
-						fm["created_by"] = author;
-						if (!fm["content_origin"]) {
-							fm["content_origin"] = "human-authored";
+						frontmatter["created_by"] = author;
+						if (!frontmatter["content_origin"]) {
+							frontmatter["content_origin"] = "human-authored";
 						}
 					}
 				}
-				fm["last_modified_by"] = author;
-				fm["edit_count"] =
-					typeof fm["edit_count"] === "number"
-						? fm["edit_count"] + 1
+				frontmatter["last_modified_by"] = author;
+				frontmatter["edit_count"] =
+					typeof frontmatter["edit_count"] === "number"
+						? frontmatter["edit_count"] + 1
 						: 1;
 			});
 
@@ -462,14 +496,16 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 		try {
 			let alreadyHasField = false;
 
-			await this.app.fileManager.processFrontMatter(file, (fm) => {
-				if (fm["created_by"]) {
+			await this.app.fileManager.processFrontMatter(file, (rawFrontmatter) => {
+				const frontmatter: unknown = rawFrontmatter;
+				if (!isRecord(frontmatter)) return;
+				if (frontmatter["created_by"]) {
 					alreadyHasField = true;
 					return;
 				}
-				fm["created_by"] = author;
-				if (!fm["content_origin"]) {
-					fm["content_origin"] = contentOrigin;
+				frontmatter["created_by"] = author;
+				if (!frontmatter["content_origin"]) {
+					frontmatter["content_origin"] = contentOrigin;
 				}
 			});
 
@@ -550,7 +586,7 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 			if (!(child instanceof TFile)) continue;
 			if (!isLogExpired(child.name, now, days)) continue;
 			try {
-				await this.app.vault.delete(child);
+				await this.app.fileManager.trashFile(child);
 			} catch (err) {
 				this.notifyError("Failed to prune old log", err);
 			}
@@ -567,11 +603,40 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign(
-			{},
-			DEFAULT_SETTINGS,
-			await this.loadData(),
-		);
+		const stored: unknown = await this.loadData();
+		const data = isRecord(stored) ? stored : {};
+		const defaults = defaultSettings(this.app.vault.configDir);
+		this.settings = {
+			authorName:
+				typeof data.authorName === "string"
+					? data.authorName
+					: defaults.authorName,
+			debounceMs:
+				typeof data.debounceMs === "number"
+					? data.debounceMs
+					: defaults.debounceMs,
+			maxCacheSize:
+				typeof data.maxCacheSize === "number"
+					? data.maxCacheSize
+					: defaults.maxCacheSize,
+			ignoreFolders: isStringArray(data.ignoreFolders)
+				? data.ignoreFolders
+				: defaults.ignoreFolders,
+			ignoreFiles: isStringArray(data.ignoreFiles)
+				? data.ignoreFiles
+				: defaults.ignoreFiles,
+			editLogsPath:
+				typeof data.editLogsPath === "string"
+					? data.editLogsPath
+					: defaults.editLogsPath,
+			logRetentionDays:
+				typeof data.logRetentionDays === "number"
+					? data.logRetentionDays
+					: defaults.logRetentionDays,
+			autoImportFolders: Array.isArray(data.autoImportFolders)
+				? data.autoImportFolders.filter(isAutoImportMapping)
+				: defaults.autoImportFolders,
+		};
 	}
 
 	async saveSettings() {
@@ -584,7 +649,7 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 
 class AuthorshipTrackerSettingTab extends PluginSettingTab {
 	plugin: AuthorshipTrackerPlugin;
-	private _mappingsDebounce: ReturnType<typeof setTimeout> | null = null;
+	private _mappingsDebounce: WindowTimer | null = null;
 	private _pendingMappings: string | null = null;
 
 	constructor(app: App, plugin: AuthorshipTrackerPlugin) {
@@ -601,7 +666,7 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 
 	private flushMappings(): void {
 		if (this._mappingsDebounce) {
-			clearTimeout(this._mappingsDebounce);
+			clearWindowTimer(this._mappingsDebounce);
 			this._mappingsDebounce = null;
 		}
 		const pending = this._pendingMappings;
@@ -700,7 +765,9 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 			)
 			.addTextArea((text) =>
 				text
-					.setPlaceholder("Templates, Excalidraw, .obsidian")
+					.setPlaceholder(
+						`Templates, Excalidraw, ${this.app.vault.configDir}`,
+					)
 					.setValue(this.plugin.settings.ignoreFolders.join(", "))
 					.onChange(async (value) => {
 						this.plugin.settings.ignoreFolders = value
@@ -799,10 +866,10 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 						// must not run on every keystroke — and a half-typed pattern
 						// like "^(" is not an error worth shouting about yet.
 						if (this._mappingsDebounce) {
-							clearTimeout(this._mappingsDebounce);
+							clearWindowTimer(this._mappingsDebounce);
 						}
 						this._pendingMappings = value;
-						this._mappingsDebounce = setTimeout(() => {
+						this._mappingsDebounce = window.setTimeout(() => {
 							this._mappingsDebounce = null;
 							const pending = this._pendingMappings;
 							this._pendingMappings = null;

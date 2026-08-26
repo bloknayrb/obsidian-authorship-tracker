@@ -152,6 +152,24 @@ describe("AuthorshipTrackerPlugin", () => {
 	// ── Ignore rules ──────────────────────────────────────────────────────────
 
 	describe("ignore rules", () => {
+		it("ignores the vault's configured folder rather than assuming .obsidian", async () => {
+			app.vault.configDir = "Vault Settings";
+			const configFile = app.vault.__seed(
+				"Vault Settings/appearance.md",
+				"# Settings\n",
+			);
+			const ordinaryFile = app.vault.__seed("Notes/a.md", "# Note\n");
+			plugin = await boot(app);
+
+			await edit(app, configFile, "# Settings\nchanged\n");
+			await edit(app, ordinaryFile, "# Note\nchanged\n");
+
+			expect(readFrontMatter(app, configFile.path)).toEqual({});
+			expect(readFrontMatter(app, ordinaryFile.path).last_modified_by).toBe(
+				"tester",
+			);
+		});
+
 		it("skips ignored folders while still stamping everything else", async () => {
 			const keep = app.vault.__seed("Notes/keep.md", "# keep\n");
 			const skip = app.vault.__seed("Templates/skip.md", "# skip\n");
