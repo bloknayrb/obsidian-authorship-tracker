@@ -518,6 +518,21 @@ describe("AuthorshipTrackerPlugin", () => {
 			});
 		});
 
+		it("raises a stored number below its usable minimum", async () => {
+			// data.json is an ordinary file. A hand edit or an older version can
+			// leave debounceMs at 0, which would stamp frontmatter and append a log
+			// line on essentially every keystroke.
+			plugin = await boot(app, {
+				debounceMs: 0,
+				maxCacheSize: 0,
+				logRetentionDays: -3,
+			});
+
+			expect(plugin.settings.debounceMs).toBe(1000);
+			expect(plugin.settings.maxCacheSize).toBe(1);
+			expect(plugin.settings.logRetentionDays).toBe(0);
+		});
+
 		it("drops a stored mapping whose filenamePattern is not a string", async () => {
 			// data.json is a plain file a user (or a sync conflict) can corrupt. A
 			// non-string pattern used to slip past the settings guard and then throw

@@ -25,6 +25,7 @@ import {
 import { describeProblem, setPoisonListener } from "./src/patterns";
 import {
 	AuthorshipTrackerSettings,
+	LOSSY_TEXT_KEYS,
 	NUMERIC_BOUNDS,
 	SETTING_COPY,
 	SettingKey,
@@ -84,6 +85,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+// data.json is an ordinary file: a hand edit, a sync conflict, or a value stored
+// by an older version can put a number below its usable minimum. debounceMs = 0
+// would stamp frontmatter and append a log line on essentially every keystroke,
+// so the bound is applied on read as well as on write.
+function boundedSetting(
+	value: unknown,
+	key: keyof typeof NUMERIC_BOUNDS,
+	fallback: number,
+): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+	return Math.max(NUMERIC_BOUNDS[key], Math.floor(value));
 }
 
 function isAutoImportMapping(value: unknown): value is AutoImportMapping {
@@ -612,14 +626,16 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 				typeof data.authorName === "string"
 					? data.authorName
 					: defaults.authorName,
-			debounceMs:
-				typeof data.debounceMs === "number"
-					? data.debounceMs
-					: defaults.debounceMs,
-			maxCacheSize:
-				typeof data.maxCacheSize === "number"
-					? data.maxCacheSize
-					: defaults.maxCacheSize,
+			debounceMs: boundedSetting(
+				data.debounceMs,
+				"debounceMs",
+				defaults.debounceMs,
+			),
+			maxCacheSize: boundedSetting(
+				data.maxCacheSize,
+				"maxCacheSize",
+				defaults.maxCacheSize,
+			),
 			ignoreFolders: isStringArray(data.ignoreFolders)
 				? data.ignoreFolders
 				: defaults.ignoreFolders,
@@ -630,10 +646,11 @@ export default class AuthorshipTrackerPlugin extends Plugin {
 				typeof data.editLogsPath === "string"
 					? data.editLogsPath
 					: defaults.editLogsPath,
-			logRetentionDays:
-				typeof data.logRetentionDays === "number"
-					? data.logRetentionDays
-					: defaults.logRetentionDays,
+			logRetentionDays: boundedSetting(
+				data.logRetentionDays,
+				"logRetentionDays",
+				defaults.logRetentionDays,
+			),
 			autoImportFolders: Array.isArray(data.autoImportFolders)
 				? data.autoImportFolders.filter(isAutoImportMapping)
 				: defaults.autoImportFolders,
@@ -675,6 +692,16 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 	plugin: AuthorshipTrackerPlugin;
 	private _mappingsDebounce: WindowTimer | null = null;
 	private _pendingMappings: string | null = null;
+	// Raw text for the controls whose stored form is not text, held for as long
+	// as the tab is open.
+	//
+	// Obsidian reseeds a control from getControlValue on every render, and
+	// re-serializing what was parsed is lossy: "A, B," parses to ["A","B"] and
+	// renders back as "A, B", eating the separator the user just typed, and a
+	// half-typed mapping line disappears entirely. Echoing the raw text back
+	// keeps the field stable while it is being edited; the drafts are dropped on
+	// close, so reopening shows the canonical serialization.
+	private _controlDrafts: Map<SettingKey, string> = new Map();
 
 	constructor(app: App, plugin: AuthorshipTrackerPlugin) {
 		super(app, plugin);
@@ -685,17 +712,27 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 	// window — that would be a regression from the previous save-per-keystroke
 	// behavior, and the user has no way to know it happened.
 	hide(): void {
+		this._controlDrafts.clear();
 		this.flushMappings();
 	}
 
 	private flushMappings(): void {
+		const wasPendingWarning = this._mappingsDebounce !== null;
 		if (this._mappingsDebounce) {
 			clearWindowTimer(this._mappingsDebounce);
 			this._mappingsDebounce = null;
 		}
 		const pending = this._pendingMappings;
 		this._pendingMappings = null;
-		if (pending !== null) void this.commitMappings(pending);
+		if (pending !== null) {
+			void this.commitMappings(pending);
+			return;
+		}
+		// Declarative path: the mappings are already stored and only the warning
+		// was waiting on the debounce. Closing the tab must not swallow it.
+		if (wasPendingWarning && !this.plugin.isDisabled) {
+			warnAboutMappingPatterns(this.plugin.settings.autoImportFolders);
+		}
 	}
 
 	// Save what the user typed, and report any pattern that cannot be used.
@@ -833,7 +870,11 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 	}
 
 	getControlValue(key: string): unknown {
-		return readControlValue(this.plugin.settings, key as SettingKey);
+		const settingKey = key as SettingKey;
+		const draft = this._controlDrafts.get(settingKey);
+		return draft !== undefined
+			? draft
+			: readControlValue(this.plugin.settings, settingKey);
 	}
 
 	// Every key is handled explicitly and the write goes through the plugin's own
@@ -849,6 +890,10 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 	async setControlValue(key: string, value: unknown): Promise<void> {
 		if (this.plugin.isDisabled) return;
 		const settingKey = key as SettingKey;
+		// Parsing is lossy, so keep what was typed for as long as the tab is open.
+		if (typeof value === "string" && LOSSY_TEXT_KEYS.has(settingKey)) {
+			this._controlDrafts.set(settingKey, value);
+		}
 		applyControlValue(this.plugin.settings, settingKey, value);
 		await this.plugin.saveSettings();
 		// Unlike display(), the value is stored immediately: Obsidian reseeds a
@@ -997,13 +1042,6 @@ class AuthorshipTrackerSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName(SETTING_COPY.autoImportFolders.heading)
 			.setHeading();
-
-		const desc = containerEl.createEl("p", {
-			cls: "setting-item-description",
-		});
-		desc.setText(
-			"Files created in these folders are stamped with the mapped author and content origin. One mapping per line: Folder=Author|ContentOrigin[|FilenamePattern].",
-		);
 
 		new Setting(containerEl)
 			.setName(SETTING_COPY.autoImportFolders.name)

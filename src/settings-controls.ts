@@ -52,6 +52,15 @@ export const NUMERIC_BOUNDS: Record<
 	logRetentionDays: 0,
 };
 
+// The settings stored as arrays rather than text. Round-tripping their control
+// value through parse and re-serialize is lossy — "A, B," comes back as "A, B"
+// — so the tab echoes the raw text while the field is being edited.
+export const LOSSY_TEXT_KEYS: ReadonlySet<SettingKey> = new Set<SettingKey>([
+	"ignoreFolders",
+	"ignoreFiles",
+	"autoImportFolders",
+]);
+
 // Display copy shared by both settings paths — the declarative definitions and
 // the deprecated imperative `display()`. Kept in one place so the two renderings
 // cannot drift apart.
@@ -101,7 +110,7 @@ export const SETTING_COPY = {
 		// SettingDefinitionGroup has no `desc` field. The format spec that
 		// display() renders as a loose <p> therefore lives here, so 1.13 users
 		// still get it.
-		desc: "One mapping per line: Folder=Author|ContentOrigin[|FilenamePattern]. Example: Emails=importer:email|primary. The optional third field is a regex matched against the file name.",
+		desc: "Files created in these folders are stamped with the mapped author and content origin. One mapping per line: Folder=Author|ContentOrigin[|FilenamePattern]. Example: Emails=importer:email|primary. The optional third field is a regex matched against the file name.",
 		heading: "Auto-import folders",
 		placeholder:
 			"Emails=importer:email|primary\nMeetings=importer:transcript|primary|^Transcript-",

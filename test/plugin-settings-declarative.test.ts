@@ -102,9 +102,36 @@ describe("declarative settings (Obsidian 1.13+)", () => {
 		// malformed value and silently resets it to defaults on next launch.
 		expect(plugin.settings.ignoreFolders).toEqual(["Templates", "Archive"]);
 		expect(Array.isArray(plugin.settings.ignoreFolders)).toBe(true);
+
+		// While the tab is open the field echoes what was typed. Re-serializing
+		// the parsed value would hand back "Templates, Archive" and eat the
+		// separator the user just typed — and a re-render can happen at any time.
+		expect(tab.__renderedValue(COPY.ignoreFolders.name)).toBe(
+			" Templates , Archive ,, ",
+		);
+
+		// Reopening shows the canonical form.
+		tab.hide();
 		expect(tab.__renderedValue(COPY.ignoreFolders.name)).toBe(
 			"Templates, Archive",
 		);
+	});
+
+	it("does not eat a half-typed mapping line on re-render", async () => {
+		plugin = await boot(app, { autoImportFolders: [] });
+		const tab = tabOf();
+
+		// Mid-edit: the second line is incomplete and parses to nothing.
+		await tab.__setControlFromUser(
+			COPY.autoImportFolders.name,
+			"Emails=importer:email|primary\nMeet",
+		);
+
+		expect(tab.__renderedValue(COPY.autoImportFolders.name)).toBe(
+			"Emails=importer:email|primary\nMeet",
+		);
+		// The complete line is still stored.
+		expect(plugin.settings.autoImportFolders).toHaveLength(1);
 	});
 
 	it("resizes the live content cache when cache size changes", async () => {
@@ -248,6 +275,24 @@ describe("declarative settings (Obsidian 1.13+)", () => {
 			await vi.advanceTimersByTimeAsync(5000);
 
 			expect(readFrontMatter(app, "Emails/msg.md")).toEqual({});
+		});
+
+		it("still warns when the tab closes inside the debounce window", async () => {
+			// Closing settings must not swallow the warning: the mappings are
+			// already stored, so the user would otherwise never learn the pattern
+			// is unusable.
+			plugin = await boot(app, { autoImportFolders: [] });
+			const tab = tabOf();
+
+			await tab.__setControlFromUser(
+				COPY.autoImportFolders.name,
+				"Emails=importer:email|primary|(a+)+$",
+			);
+			expect(__notices).toEqual([]);
+
+			tab.hide();
+
+			expect(__notices.join("\n")).toMatch(/unusable filename pattern/i);
 		});
 
 		it("does not warn after the plugin is unloaded", async () => {
